@@ -1,11 +1,13 @@
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import warnings
 from typing import Optional
 from gen.individ import Individual
 from abc import ABC, abstractmethod
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import LabelEncoder
 
 
@@ -24,39 +26,22 @@ class MLFitnessEvaluator(FitnessEvaluator):
     def __init__(self, target_col: str):
         self.target_col = target_col
 
-    @staticmethod
-    def _ensure_1d_labels(y: np.ndarray) -> np.ndarray:
-        """Convert labels to 1D format"""
-        y = np.asarray(y)
-        if y.ndim == 1:
-            return y
-        if y.ndim == 2:
-            if y.shape[1] == 1:
-                return y.ravel()
-            return np.argmax(y, axis=1)
-        return y.ravel()
+    _ensure_1d_labels = staticmethod(
+        lambda y: np.argmax(y, axis=1) if (y := np.asarray(y)).ndim == 2 and y.shape[1] > 1 else y.ravel())
 
     @staticmethod
-    def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
-        """Safe ROC AUC computation"""
-        y_true = MLFitnessEvaluator._ensure_1d_labels(y_true)
-        y_score = np.asarray(y_score)
-
+    def _sum_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
+        y_true, y_score = MLFitnessEvaluator._ensure_1d_labels(y_true), np.asarray(y_score)
         if np.unique(y_true).size < 2:
             return None
-
         try:
-            if y_score.ndim == 2 and y_score.shape[1] == 2:
-                return float(roc_auc_score(y_true, y_score[:, 1]))
             if y_score.ndim == 1:
                 return float(roc_auc_score(y_true, y_score))
-            if y_score.ndim == 2 and y_score.shape[1] > 2:
-                return float(
-                    roc_auc_score(y_true, y_score, multi_class="ovr", average="macro")
-                )
+            if y_score.shape[1] == 2:
+                return float(roc_auc_score(y_true, y_score[:, 1]))
+            return float(roc_auc_score(y_true, y_score, multi_class="ovr", average="macro"))
         except Exception:
             return None
-        return None
 
     def _fit_and_score(
         self,
@@ -71,13 +56,10 @@ class MLFitnessEvaluator(FitnessEvaluator):
 
         # Logistic Regression
         try:
-            import warnings
-
+            
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=FutureWarning)
                 warnings.filterwarnings("ignore", category=UserWarning)
-                from sklearn.exceptions import ConvergenceWarning
-
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
                 lr = LogisticRegression(solver="lbfgs", max_iter=100, random_state=42)
@@ -98,8 +80,8 @@ class MLFitnessEvaluator(FitnessEvaluator):
         clf.fit(X_train, y_train)
         proba_clf = clf.predict_proba(X_test)
 
-        auc_lr = self._safe_roc_auc(y_test, proba_lr)
-        auc_clf = self._safe_roc_auc(y_test, proba_clf)
+        auc_lr = self._sum_roc_auc(y_test, proba_lr)
+        auc_clf = self._sum_roc_auc(y_test, proba_clf)
 
         if auc_lr is None or auc_clf is None:
             return -1e6
@@ -124,3 +106,4 @@ class MLFitnessEvaluator(FitnessEvaluator):
         y_test = le.transform(y_test)
 
         return self._fit_and_score(X_train, y_train, X_test, y_test)
+
