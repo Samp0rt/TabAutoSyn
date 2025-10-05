@@ -5,22 +5,22 @@ from abc import ABC, abstractmethod
 
 
 class SelectionOperator(ABC):
-    """Абстрактный класс для оператора селекции"""
+    """Abstract class for selection operator"""
 
     @abstractmethod
     def select(self, population: List[Individual], n: int) -> List[Individual]:
-        """Выбор индивидов из популяции"""
+        """Select individuals from population"""
         pass
 
 
 class TournamentSelection(SelectionOperator):
-    """Турнирная селекция"""
+    """Tournament selection"""
 
     def __init__(self, tournament_size: int = 3):
         self.tournament_size = tournament_size
 
     def select(self, population: List[Individual], n: int) -> List[Individual]:
-        """Турнирная селекция"""
+        """Tournament selection"""
         selected = []
         for _ in range(n):
             tournament = random.sample(population, self.tournament_size)

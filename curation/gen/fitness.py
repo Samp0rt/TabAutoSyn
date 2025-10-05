@@ -10,23 +10,23 @@ from sklearn.preprocessing import LabelEncoder
 
 
 class FitnessEvaluator(ABC):
-    """Абстрактный класс для оценки fitness"""
+    """Abstract class for fitness evaluation"""
 
     @abstractmethod
     def evaluate(self, individual: Individual, test_data: pd.DataFrame) -> float:
-        """Оценка fitness индивида"""
+        """Evaluate individual fitness"""
         pass
 
 
 class MLFitnessEvaluator(FitnessEvaluator):
-    """Оценка fitness через машинное обучение"""
+    """Fitness evaluation through machine learning"""
 
     def __init__(self, target_col: str):
         self.target_col = target_col
 
     @staticmethod
     def _ensure_1d_labels(y: np.ndarray) -> np.ndarray:
-        """Приведение меток к 1D формату"""
+        """Convert labels to 1D format"""
         y = np.asarray(y)
         if y.ndim == 1:
             return y
@@ -38,7 +38,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
 
     @staticmethod
     def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
-        """Безопасное вычисление ROC AUC"""
+        """Safe ROC AUC computation"""
         y_true = MLFitnessEvaluator._ensure_1d_labels(y_true)
         y_score = np.asarray(y_score)
 
@@ -65,7 +65,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
         X_test: np.ndarray,
         y_test: np.ndarray,
     ) -> float:
-        """Обучение моделей и вычисление общего score"""
+        """Train models and compute overall score"""
         if len(np.unique(y_train)) < 2:
             return -1e6
 
@@ -107,7 +107,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
         return float(auc_lr + auc_clf)
 
     def evaluate(self, individual: Individual, test_data: pd.DataFrame) -> float:
-        """Оценка fitness индивида"""
+        """Evaluate individual fitness"""
         df_ind = individual.to_dataframe()
         feature_cols = individual.feature_cols
 
@@ -117,7 +117,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
         X_test = test_data[feature_cols].astype(float).to_numpy()
         y_test = test_data[self.target_col].to_numpy()
 
-        # Общий LabelEncoder для train и test
+        # Common LabelEncoder for train and test
         le = LabelEncoder()
         le.fit(np.concatenate([y_train, y_test]))
         y_train = le.transform(y_train)

@@ -5,18 +5,18 @@ from abc import ABC, abstractmethod
 
 
 class CrossoverOperator(ABC):
-    """Абстрактный класс для оператора кроссовера"""
+    """Abstract class for crossover operator"""
 
     @abstractmethod
     def crossover(
         self, ind1: Individual, ind2: Individual
     ) -> Tuple[Individual, Individual]:
-        """Выполнение кроссовера"""
+        """Perform crossover"""
         pass
 
 
 class ExchangeCrossover(CrossoverOperator):
-    """Кроссовер через обмен строками (без копий)"""
+    """Crossover by exchanging rows (without duplicates)"""
 
     def __init__(self, exchange_rate_range: Tuple[float, float] = (0.05, 0.3)):
         self.exchange_rate_range = exchange_rate_range
@@ -24,7 +24,7 @@ class ExchangeCrossover(CrossoverOperator):
     def crossover(
         self, ind1: Individual, ind2: Individual
     ) -> Tuple[Individual, Individual]:
-        """Обмен строками между двумя индивидами"""
+        """Exchange rows between two individuals"""
         size = min(len(ind1), len(ind2))
         k = max(1, int(size * random.uniform(*self.exchange_rate_range)))
 
@@ -34,7 +34,7 @@ class ExchangeCrossover(CrossoverOperator):
         for a, b in zip(idxs1, idxs2):
             row1, row2 = ind1[a], ind2[b]
 
-            # Избегаем дубликатов
+            # Avoid duplicates
             if row2 in ind1.data:
                 alternatives = [r for r in ind2.data if r not in ind1.data]
                 if alternatives:

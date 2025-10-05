@@ -14,15 +14,15 @@ from gen.selection import SelectionOperator, TournamentSelection
 
 @dataclass
 class GAConfig:
-    """Конфигурация генетического алгоритма
+    """Genetic algorithm configuration
     Args:
-        n_generations: количество поколений
-        crossover_prob: вероятность применения кроссовера
-        mutation_prob: вероятность мутации
-        tournament_size: количество особей, участвующие в турнирном отборе
-        population_size: размер популяции
-        n_bootstrap_samples: размер начальной популяции при использовании бутстрепа
-        bootstrap_sample_ratio:
+        n_generations: number of generations
+        crossover_prob: probability of applying crossover
+        mutation_prob: probability of mutation
+        tournament_size: number of individuals participating in tournament selection
+        population_size: population size
+        n_bootstrap_samples: initial population size when using bootstrap
+        bootstrap_sample_ratio: bootstrap sample ratio
 
     """
 
@@ -40,7 +40,7 @@ class GAConfig:
 
 @dataclass
 class GAResult:
-    """Результат работы генетического алгоритма"""
+    """Genetic algorithm result"""
 
     rank: int
     fitness: float
@@ -49,14 +49,14 @@ class GAResult:
 
 
 class GeneticAlgorithm:
-    """Основной класс генетического алгоритма
+    """Main genetic algorithm class
     Args:
-        config:
-        fitness_evaluator: fitness-функция
-        crossover_operator: оператор кроссовера
-        mutation_operator: оператор мутации
-        selection_operator: оператор отбора
-        target_col: целевая переменная
+        config: configuration
+        fitness_evaluator: fitness function
+        crossover_operator: crossover operator
+        mutation_operator: mutation operator
+        selection_operator: selection operator
+        target_col: target variable
 
     """
 
@@ -72,7 +72,7 @@ class GeneticAlgorithm:
         self.config = config or GAConfig()
         self.target_col = target_col
 
-        # Компоненты по умолчанию
+        # Default components
         self.fitness_evaluator = fitness_evaluator or MLFitnessEvaluator(target_col)
         self.crossover_operator = crossover_operator or ExchangeCrossover(
             exchange_rate_range=self.config.exchange_rate_range
@@ -81,7 +81,7 @@ class GeneticAlgorithm:
             tournament_size=self.config.tournament_size
         )
 
-        # mutation_operator будет инициализирован в run() когда будет известен global_pool
+        # mutation_operator will be initialized in run() when global_pool is known
         self.mutation_operator = mutation_operator
 
         self.history = {"max": [], "avg": []}
@@ -91,21 +91,21 @@ class GeneticAlgorithm:
     def _evaluate_population(
         self, population: List[Individual], test_data: pd.DataFrame
     ):
-        """Оценка всей популяции"""
+        """Evaluate entire population"""
         for ind in population:
             if ind.fitness_value is None:
                 ind.fitness_value = self.fitness_evaluator.evaluate(ind, test_data)
 
     def _evolve_generation(self, population: List[Individual]) -> List[Individual]:
-        """Эволюция одного поколения"""
-        # Селекция
+        """Evolve one generation"""
+        # Selection
         offspring = self.selection_operator.select(population, len(population))
         offspring = [
             Individual(list(ind.data), ind.feature_cols, ind.target_col)
             for ind in offspring
         ]
 
-        # Кроссовер
+        # Crossover
         for i in range(0, len(offspring) - 1, 2):
             if random.random() < self.config.crossover_prob:
                 offspring[i], offspring[i + 1] = self.crossover_operator.crossover(
@@ -114,7 +114,7 @@ class GeneticAlgorithm:
                 offspring[i].fitness_value = None
                 offspring[i + 1].fitness_value = None
 
-        # Мутация
+        # Mutation
         for ind in offspring:
             if random.random() < self.config.mutation_prob:
                 self.mutation_operator.mutate(ind)
@@ -129,21 +129,21 @@ class GeneticAlgorithm:
         feature_cols: Optional[List[str]] = None,
         initial_population: Optional[List[pd.DataFrame]] = None,
     ) -> List[GAResult]:
-        """Запуск генетического алгоритма
+        """Run genetic algorithm
 
         Args:
-            df_train: Тренировочные данные
-            df_test: Тестовые данные
-            feature_cols: Список колонок признаков (если None, все кроме target_col)
-            initial_population: Начальная популяция (если None, создается через bootstrap)
+            df_train: Training data
+            df_test: Test data
+            feature_cols: List of feature columns (if None, all except target_col)
+            initial_population: Initial population (if None, created via bootstrap)
         """
 
-        # Определение колонок признаков
+        # Determine feature columns
         if feature_cols is None:
             feature_cols = [c for c in df_train.columns if c != self.target_col]
         self.feature_cols = feature_cols
 
-        # Создание начальной популяции через bootstrap, если не предоставлена
+        # Create initial population via bootstrap if not provided
         if initial_population is None:
             initial_population = bootstrap_sample(
                 df_train,
@@ -151,33 +151,33 @@ class GeneticAlgorithm:
                 sample_ratio=self.config.bootstrap_sample_ratio,
             )
 
-        # Создание глобального пула для мутации
+        # Create global pool for mutation
         if self.global_pool is None:
             self.global_pool = create_global_pool(
                 initial_population, feature_cols, self.target_col
             )
 
-        # Инициализация оператора мутации, если не был предоставлен
+        # Initialize mutation operator if not provided
         if self.mutation_operator is None:
             self.mutation_operator = ReplacementMutation(
                 self.global_pool, mutation_rate=self.config.mutation_rate
             )
 
-        # Создание начальной популяции из Individual
+        # Create initial population from Individual
         population = [
             Individual.from_dataframe(df, feature_cols, self.target_col)
             for df in initial_population
         ]
 
-        # Начальная оценка
+        # Initial evaluation
         self._evaluate_population(population, df_test)
 
-        # Эволюция
+        # Evolution
         for gen in range(1, self.config.n_generations + 1):
             population = self._evolve_generation(population)
             self._evaluate_population(population, df_test)
 
-            # Статистика
+            # Statistics
             fitness_values = [ind.fitness_value for ind in population]
             self.history["max"].append(max(fitness_values))
             self.history["avg"].append(np.mean(fitness_values))
@@ -188,7 +188,7 @@ class GeneticAlgorithm:
                     f"avg={self.history['avg'][-1]:.4f}"
                 )
 
-        # Результаты
+        # Results
         population.sort(key=lambda ind: ind.fitness_value, reverse=True)
 
         results = []
@@ -205,7 +205,7 @@ class GeneticAlgorithm:
         return results
 
     def plot_history(self):
-        """Визуализация прогресса алгоритма"""
+        """Visualize algorithm progress"""
         plt.figure(figsize=(10, 5))
         generations = range(1, len(self.history["max"]) + 1)
         plt.plot(generations, self.history["max"], label="Max Fitness", linewidth=2)
@@ -222,7 +222,7 @@ class GeneticAlgorithm:
 def bootstrap_sample(
     data: pd.DataFrame, n_samples: int = 1000, sample_ratio: float = 0.7
 ) -> List[pd.DataFrame]:
-    """Создание bootstrap выборок"""
+    """Create bootstrap samples"""
     bootstrap_samples = []
     n = int(len(data) * sample_ratio)
     for _ in range(n_samples):
@@ -235,7 +235,7 @@ def bootstrap_sample(
 def create_global_pool(
     dataframes: List[pd.DataFrame], feature_cols: List[str], target_col: str
 ) -> List[Tuple]:
-    """Создание глобального пула уникальных строк"""
+    """Create global pool of unique rows"""
     global_pool = set()
     for df in dataframes:
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
