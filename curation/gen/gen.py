@@ -145,11 +145,35 @@ class GeneticAlgorithm:
 
         # Create initial population via bootstrap if not provided
         if initial_population is None:
-            initial_population = bootstrap_sample(
-                df_train,
-                n_samples=self.config.n_bootstrap_samples,
-                sample_ratio=self.config.bootstrap_sample_ratio,
-            )
+        
+            max_attempts = 5
+            target_classes = set(df_train[self.target_col].unique())
+            initial_population = None
+            valid_population = False
+
+            for attempt in range(1, max_attempts + 1):
+                initial_population = bootstrap_sample(
+                    df_train,
+                    n_samples=self.config.n_bootstrap_samples,
+                    sample_ratio=self.config.bootstrap_sample_ratio
+                )
+
+                # Ensure every bootstrap sample includes all target classes
+                if all(target_classes.issubset(set(df[self.target_col].unique())) for df in initial_population):
+                    valid_population = True
+                    if self.config.verbose:
+                        logging.info(f"Initial population successfully created on attempt {attempt}.")
+                    break
+                else:
+                    logging.warning(
+                        f"Attempt {attempt}/{max_attempts}: not all target classes are present in bootstrap samples."
+                    )
+
+            if not valid_population:
+                logging.error(
+                    f"Failed to create initial_population with all target classes after {max_attempts} attempts. "
+                    "Continuing with the last generated population."
+                )
 
         # Create global pool for mutation
         if self.global_pool is None:
@@ -192,7 +216,7 @@ class GeneticAlgorithm:
         population.sort(key=lambda ind: ind.fitness_value, reverse=True)
 
         results = []
-        for rank, ind in enumerate(population[:10], start=1):
+        for rank, ind in enumerate(population[:1], start=1):
             results.append(
                 GAResult(
                     rank=rank,
@@ -202,7 +226,7 @@ class GeneticAlgorithm:
                 )
             )
 
-        return results
+        return results[0].df
 
     def plot_history(self):
         """Visualize algorithm progress"""
@@ -241,3 +265,4 @@ def create_global_pool(
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
             global_pool.add(tuple(row))
     return list(global_pool)
+
