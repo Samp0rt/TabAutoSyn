@@ -1,0 +1,26 @@
+df_name,target_name,task_type,numeric_cols_indxs,row_number
+560_bodyfat,target,regression,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]",201
+562_cpu_small,target,regression,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]",6553
+adult,income,classification,"[0, 2, 4, 10, 11, 12]",26049
+beijing,pm2.5,regression,"[0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11]",35059
+breast_cancer,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]",455
+california_housing,median_house_value,regression,"[0, 1, 2, 3, 4, 5, 6, 7]",16512
+covtype,Cover_Type,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53]",464809
+creditcard,Class,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]",227845
+credit_g,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]",800
+dataset_38_sick,Class,classification,"[0, 1, 2, 3, 4, 5, 6]",3017
+default_of_credit_card_clients,default payment next month,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]",24000
+diabetes,target,regression,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",353
+heloc_dataset_v1,RiskPerformance,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]",8367
+iris,target,classification,"[0, 1, 2, 3]",120
+magic04,class,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",15216
+nursery,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7]",10366
+OnlineNewsPopularity,shares,regression,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]",31715
+online_shoppers_intention,Revenue,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]",9864
+page_blocks,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",4378
+pendigits,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]",8793
+phoneme,target,classification,"[0, 1, 2, 3, 4]",4323
+seattle_housing,price,regression,"[0, 1, 2, 4, 6]",1613
+travel,Target,classification,"[0, 3]",763
+us_location,bird,classification,"[1, 2]",16320
+wine,target,classification,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]",142

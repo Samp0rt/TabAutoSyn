@@ -1,11 +1,16 @@
+from tabnanny import verbose
 import pandas as pd
 from tabautosyn.custom_metric import Metric  ### in progress ###
 from tabautosyn.optimization import HyperparameterOptimizer
 from tabautosyn.outliers import ExtractOutliers  ### in progress ###
+from tabautosyn.llm_generator import LLMGenerator
+from tabautosyn.gen.gen import GAConfig, GeneticAlgorithm
 
 # Synthcity
 from synthcity.plugins import Plugins
 from synthcity.plugins.core.dataloader import GenericDataLoader
+
+from openai import OpenAI
 
 
 class TabAutoSyn:
@@ -28,8 +33,8 @@ class TabAutoSyn:
 
     def __init__(
         self,
-        model: str = "task_specific",
-        task: str = "universal",
+        model: str = "LLM",
+        task: str | None = None,
         verbose: bool = False,
     ):
         """
@@ -37,25 +42,29 @@ class TabAutoSyn:
 
         Args:
             model (str, optional): The synthesis model to use.
-                - "task_specific": Uses task-specific model
-                - "LLM": Uses large language model-based synthesis
-                Defaults to "task_specific".
+                "task_specific": Uses task-specific model
+                "LLM": Uses large language model-based synthesis
 
-            task (str, optional): The type of task for data synthesis if model "task-specific" is set.
-                - "ml": Machine learning focused synthesis
-                - "privacy": Privacy-preserving data generation
-                - "universal": General-purpose data synthesis
-                Defaults to "universal".
+                Defaults to "LLM"
+
+            task (str, optional): The type of task for data synthesis if model "task-specific" is set
+                "ml": Machine learning focused synthesis
+                "privacy": Privacy-preserving data generation
+                "universal": General-purpose data synthesis
+
+                Defaults to "universal"
 
             verbose (bool, optional): Whether to print detailed progress information
-                during data processing and synthesis. Defaults to False.
+                during data processing and synthesis. 
+                
+                Defaults to False.
 
         Raises:
             ValueError: If the provided task is not in the list of valid tasks.
         """
         # Valid tasks
         valid_tasks = ["ml", "privacy", "universal"]
-        if task not in valid_tasks:
+        if model == "task_specific" and task not in valid_tasks:
             raise ValueError(f"Invalid task '{task}'. Must be one of: {valid_tasks}")
 
         # Valid models
@@ -129,14 +138,46 @@ class TabAutoSyn:
 
         return processed_data
 
-    # def _generate_synthetics_llm(self, data: pd.DataFrame) -> pd.DataFrame: (### in progress ####)
-    #     return generated_data
+    def _generate_synthetics_llm(
+        self, 
+        train_data: pd.DataFrame, 
+        plugin_name: str = "gpt-oss:20b", 
+        n_samples: int = 100,
+        batch_size: int = 10) -> pd.DataFrame: ### in progress ####
+        """
+        Generate synthetic data using LLM.
+        
+        Args:
+            train_data (pd.DataFrame): Preprocessed training data.
+            plugin_name (str): Plugin identifier, e.g. "gpt-oss:20b".
+            n_samples (int): Number of synthetic samples to generate.
+            batch_size (int): Number of samples to generate per batch.
+        
+        Returns:
+            pd.DataFrame: Generated synthetic samples.
+        """
+        client = OpenAI(
+            base_url = 'http://localhost:11434/v1',
+            api_key ='ollama'
+        )
+
+        columns = train_data.columns
+
+        if self.verbose:
+            print(f'Start generating data using model "{plugin_name}"')
+
+        generator = LLMGenerator(gen_client=client, gen_model_nm=plugin_name, real_data=train_data, cols=columns, verbose=self.verbose)
+
+        generated_data = generator.generate(n_samples=n_samples, batch_size=batch_size)
+
+        return generated_data
+
 
     def _generate_synthetics_non_llm(
         self,
         train_data: pd.DataFrame,
         plugin_name: str,
-        optimization_trials: int = 20,
+        optimization_trials: int = None,
         target_column: str = None,
         n_samples: int = 100,
         custom_metric: Metric = None,
@@ -165,40 +206,41 @@ class TabAutoSyn:
         }
 
         # Step 1: Hyperparameter optimization
-        try:
-            # Create optimizer
-            optimizer = HyperparameterOptimizer(
-                output_folder="./optimization_results",
-                n_jobs=1,
-                log_params=log_params,
-                n_trials=optimization_trials,
-                verbose=self.verbose,
-            )
-
-            # Run optimization
-            optimization_result = optimizer._optimize_plugin(
-                plugin_name=plugin_name,
-                train_data=train_data,
-                target_column=target_column,
-                df_name="optimized_dataset",
-            )
-
-            init_kwargs[plugin_name] = optimization_result.best_params
-
-            if self.verbose:
-                print("Hyperparameter optimization completed!")
-                print(
-                    f"Best parameters for {plugin_name}: {optimization_result.best_params}"
+        if optimization_trials != None:
+            try:
+                # Create optimizer
+                optimizer = HyperparameterOptimizer(
+                    output_folder="./optimization_results",
+                    n_jobs=1,
+                    log_params=log_params,
+                    n_trials=optimization_trials,
+                    verbose=self.verbose,
                 )
-                print(f"Best score for {plugin_name}: {optimization_result.best_value}")
 
-        except Exception as e:
-            if self.verbose:
-                print(f"Warning: Hyperparameter optimization failed: {str(e)}")
+                # Run optimization
+                optimization_result = optimizer._optimize_plugin(
+                    plugin_name=plugin_name,
+                    train_data=train_data,
+                    target_column=target_column,
+                    df_name="optimized_dataset",
+                )
+
+                init_kwargs[plugin_name] = optimization_result.best_params
+
+                if self.verbose:
+                    print("Hyperparameter optimization completed!")
+                    print(
+                        f"Best parameters for {plugin_name}: {optimization_result.best_params}"
+                    )
+                    print(f"Best score for {plugin_name}: {optimization_result.best_value}")
+
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Hyperparameter optimization failed: {str(e)}")
 
         # Step 2: Training plugin (ctgan, ddpm or dpgan)
         if self.verbose:
-            print(f'Start training plugin "{plugin_name}"')
+            print(f'Start training model "{plugin_name}"')
 
         generators = Plugins()
 
@@ -207,27 +249,52 @@ class TabAutoSyn:
         # if plugin_name == "ddpm" and ml_task == "classification":
         #     init_kwargs['ddpm']['is_classification'] = True
 
-        generator = generators.get(
-            plugin_name,
-            compress_dataset=False,
-            strict=False,
-            **init_kwargs[plugin_name],
-        )
+        if optimization_trials != None:
+            generator = generators.get(
+                plugin_name,
+                compress_dataset=False,
+                strict=False,
+                **init_kwargs[plugin_name],
+            )
+        else:
+            generator = generators.get(
+                plugin_name,
+                compress_dataset=False,
+                strict=False,
+                **init_kwargs[plugin_name],
+            )
 
         generator.fit(train_loader)
 
         syn_df = generator.generate(n_samples * 2)
 
-        return syn_df
+        return syn_df.dataframe()
+
+    
+    def _perform_curation(
+        self, 
+        syn_data: pd.DataFrame, 
+        real_data: pd.DataFrame,
+        target_column: str = None,
+        verbose: bool = False
+        ) -> pd.DataFrame:
+
+        config = GAConfig(n_generations=20, crossover_prob=0.6, bootstrap_sample_ratio=0.9, verbose=verbose)
+        ga = GeneticAlgorithm(config=config, target_col=target_column)
+        results = ga.run(syn_data, real_data)
+
+        return results
+
 
     def generate(
         self,
         train_data_path: str = None,
         sep: str = ",",
         n_samples: int = 100,
+        batch_size: int = 10,
         log_params: bool = False,
         custom_metric: Metric = None,
-        optimization_trials: int = 20,
+        optimization_trials: int = None,
         target_column: str = None,
     ):
         """
@@ -240,6 +307,7 @@ class TabAutoSyn:
             train_data_path (str, optional): Path to the CSV containing training data.
             sep (str): CSV delimiter.
             n_samples (int): Number of synthetic samples to generate.
+            batch_size (int): Number of samples to generate per batch for LLM.
             log_params (bool): If True, persist HPO studies to disk.
             custom_metric (Metric, optional): Placeholder for custom quality metric.
             optimization_trials (int): Number of trials for HPO.
@@ -278,15 +346,17 @@ class TabAutoSyn:
                     )
 
                 # Perform hyperparameter optimization for non-LLM model
-                if self.verbose and self.model != "LLM":
-                    print("Starting hyperparameter optimization...")
+                if optimization_trials != None:
+                    if self.verbose and self.model != "LLM":
+                        print("Starting hyperparameter optimization...")
 
-                if self.task == "privacy":
-                    plugin_name = "dpgan"
-                elif self.task == "ml":
-                    plugin_name = "ddpm"
-                elif self.task == "universal":
-                    plugin_name = "ctgan"
+                if self.model == "task_specific":
+                    if self.task == "privacy":
+                        plugin_name = "dpgan"
+                    elif self.task == "ml":
+                        plugin_name = "ddpm"
+                    elif self.task == "universal":
+                        plugin_name = "ctgan"
 
                 # We need to extract outliers to make better distribution (### in progress ####)
                 # extractor = ExtractOutliers()
@@ -310,9 +380,23 @@ class TabAutoSyn:
                     #                                                 n_samples=n_samples,
                     #                                                 custom_metric=custom_metric,
                     #                                                 log_params=log_params)
+        
+                    # pre_curated_df = pd.concat([syn_df_full, syn_outliers], axis=1)
 
-                # elif self.model == "LLM":
-                #     syn_df_full = self._generate_synthetics_llm(train_data_mod)
+                    # Start curation process
+                    if self.verbose:
+                        print(f'Starting evolutional optimization ...')
+
+                    final_curated_df = self._perform_curation(syn_data=syn_df_full, real_data=train_data_mod, target_column=target_column, verbose=self.verbose)
+
+                    return final_curated_df
+
+                elif self.model == "LLM":
+                    syn_df_full = self._generate_synthetics_llm(
+                        train_data=train_data_mod,
+                        n_samples=n_samples,
+                        batch_size=batch_size,
+                    )
                 #     syn_outliers = self._generate_synthetics_llm(outliers)
 
             except Exception as e:
