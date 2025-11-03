@@ -143,6 +143,8 @@ class GeneticAlgorithm:
             feature_cols = [c for c in df_train.columns if c != self.target_col]
         self.feature_cols = feature_cols
 
+        df_train, df_test = filter_rare_classes(df_train, df_test, target_col=self.target_col)
+        
         # Create initial population via bootstrap if not provided
         if initial_population is None:
         
@@ -265,4 +267,21 @@ def create_global_pool(
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
             global_pool.add(tuple(row))
     return list(global_pool)
+
+def filter_rare_classes(df_train, df_test, target_col):
+    """
+    Return:
+    ------------
+    df_train_filtered, df_test_filtered : (pd.DataFrame, pd.DataFrame)
+
+    """
+    min_count=len(df_train)*0.015
+    class_counts = df_train[target_col].value_counts()
+
+    valid_classes = class_counts[class_counts >= min_count].index
+
+    df_train_filtered = df_train[df_train[target_col].isin(valid_classes)].copy()
+    df_test_filtered = df_test[df_test[target_col].isin(valid_classes)].copy()
+
+    return df_train_filtered, df_test_filtered
 
