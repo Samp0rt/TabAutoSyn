@@ -338,11 +338,12 @@ def correct_tails_by_adding(
                 tail_real, tail_syn, cols, weights, divergence_metric,
                 divergence_variant, compare_metric, random_state
             )
-            D_center = compute_weighted_divergence(
+            '''D_center = compute_weighted_divergence(
                 center_real, center_syn, cols, weights, divergence_metric,
                 divergence_variant, compare_metric, random_state
-            )
-            J = hybrid_alpha * D_tail + (1 - hybrid_alpha) * D_center
+            )'''
+            J = D_tail 
+            D_center=0
             return J, D_tail, D_center
     
     # === Initial state ===
