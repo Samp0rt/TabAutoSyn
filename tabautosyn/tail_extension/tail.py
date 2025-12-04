@@ -6,7 +6,7 @@ from sklearn.neighbors import KernelDensity
 from sklearn.metrics import pairwise_distances
 from scipy.stats import entropy, wasserstein_distance
 import matplotlib.pyplot as plt
-from Matrix import matrix_eigenvalue_mse, matrix_cosine_similarity, matrix_frobenius_distance
+from .Matrix import matrix_eigenvalue_mse, matrix_cosine_similarity, matrix_frobenius_distance
 
 
 # ==========================================================

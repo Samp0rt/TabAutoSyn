@@ -12,6 +12,8 @@ from .crossover import CrossoverOperator, ExchangeCrossover
 from .mutation import MutationOperator, ReplacementMutation
 from .selection import SelectionOperator, TournamentSelection
 
+from rich.console import Console
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -145,9 +147,9 @@ class GeneticAlgorithm:
         if feature_cols is None:
             feature_cols = [c for c in syn_data.columns if c != self.target_col]
         self.feature_cols = feature_cols
-        
-        df_train, df_test = filter_rare_classes(df_train, df_test, target_col=self.target_col)
-        
+
+        syn_data, real_data = filter_rare_classes(syn_data, real_data, target_col=self.target_col)
+
         # Create initial population via bootstrap if not provided
         if initial_population is None:
         
@@ -203,20 +205,19 @@ class GeneticAlgorithm:
 
         # Evolution
         if self.config.verbose:
-            for gen in tqdm(range(1, self.config.n_generations + 1), desc='Generations:'):
-                population = self._evolve_generation(population)
-                self._evaluate_population(population, real_data)
+            console = Console()
+            with console.status("[bold green]Working on tasks...") as status:
+                for gen in range(1, self.config.n_generations + 1):
+                    population = self._evolve_generation(population)
+                    self._evaluate_population(population, real_data)
 
-                # Statistics
-                fitness_values = [ind.fitness_value for ind in population]
-                self.history["max"].append(max(fitness_values))
-                self.history["avg"].append(np.mean(fitness_values))
+                    # Statistics
+                    fitness_values = [ind.fitness_value for ind in population]
+                    self.history["max"].append(max(fitness_values))
+                    self.history["avg"].append(np.mean(fitness_values))
 
-                if self.config.verbose:
-                    print(
-                        f"Gen {gen}: max={self.history['max'][-1]:.4f} "
-                        f"avg={self.history['avg'][-1]:.4f}"
-                    )
+                    if self.config.verbose:
+                        console.log(f"Gen {gen}: max={self.history['max'][-1]:.4f}, avg={self.history['avg'][-1]:.4f}")
 
         # Results
         population.sort(key=lambda ind: ind.fitness_value, reverse=True)
@@ -270,7 +271,9 @@ def create_global_pool(
     for df in dataframes:
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
             global_pool.add(tuple(row))
+            
     return list(global_pool)
+
 
 def filter_rare_classes(df_train, df_test, target_col):
     """

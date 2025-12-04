@@ -1,14 +1,21 @@
 from tabnanny import verbose
 import pandas as pd
+import numpy as np
+import joblib
 from tabautosyn.custom_metric import Metric  ### in progress ###
 from tabautosyn.optimization import HyperparameterOptimizer
 from tabautosyn.outliers import ExtractOutliers  ### in progress ###
 from tabautosyn.llm_generator import LLMGenerator
 from tabautosyn.gen.gen import GAConfig, GeneticAlgorithm
+from tabautosyn.tail_extension.tail import correct_tails_by_adding
+
+from typing import Any
 
 # Synthcity
 from synthcity.plugins import Plugins
 from synthcity.plugins.core.dataloader import GenericDataLoader
+
+from tabautosyn.models.ctgan import CTGAN
 
 from openai import OpenAI
 
@@ -181,6 +188,7 @@ class TabAutoSyn:
         target_column: str = None,
         n_samples: int = 100,
         custom_metric: Metric = None,
+        params: str = None,
         log_params: bool = False,
     ) -> pd.DataFrame:  ### in progress ####
         """
@@ -193,6 +201,7 @@ class TabAutoSyn:
             target_column (str, optional): Supervised target column, if any.
             n_samples (int): Target number of synthetic samples to generate.
             custom_metric (Metric, optional): Custom quality metric (reserved).
+            params (str): Path to existing optimization parameters
             log_params (bool): If True, persist HPO studies to disk.
 
         Returns:
@@ -206,7 +215,7 @@ class TabAutoSyn:
         }
 
         # Step 1: Hyperparameter optimization
-        if optimization_trials != None:
+        if optimization_trials != None and params == None:
             try:
                 # Create optimizer
                 optimizer = HyperparameterOptimizer(
@@ -238,9 +247,17 @@ class TabAutoSyn:
                 if self.verbose:
                     print(f"Warning: Hyperparameter optimization failed: {str(e)}")
 
-        # Step 2: Training plugin (ctgan, ddpm or dpgan)
-        if self.verbose:
-            print(f'Start training model "{plugin_name}"')
+        # Step 2: Extracting existing params
+        if params != None:
+            try:
+                optimization_result = joblib.load(params)
+                init_kwargs[plugin_name] = optimization_result.best_params
+            except:
+                raise ValueError(f"Error while using predefined Optuna params: {str(e)}")
+
+        # Step 3: Training plugin (ctgan, ddpm or dpgan)
+        if self.verbose and (optimization_trials != None or params != None):
+            print(f'Start training model "{plugin_name}". Using parameters:\n{init_kwargs[plugin_name]}')
 
         generators = Plugins()
 
@@ -249,24 +266,29 @@ class TabAutoSyn:
         # if plugin_name == "ddpm" and ml_task == "classification":
         #     init_kwargs['ddpm']['is_classification'] = True
 
-        if optimization_trials != None:
+        # if init_kwargs[plugin_name] != {}:
+        try:
             generator = generators.get(
                 plugin_name,
                 compress_dataset=False,
                 strict=False,
                 **init_kwargs[plugin_name],
             )
-        else:
-            generator = generators.get(
-                plugin_name,
-                compress_dataset=False,
-                strict=False,
-                **init_kwargs[plugin_name],
-            )
+            generator.fit(train_loader)
+            syn_df = generator.generate(n_samples * 2)
 
-        generator.fit(train_loader)
-
-        syn_df = generator.generate(n_samples * 2)
+        except ValueError:
+            print('\nTrying fitting generator without optimization parameters...')
+            try:
+                generator = generators.get(
+                    plugin_name,
+                    compress_dataset=False,
+                    strict=False,
+                )
+                generator.fit(train_loader)
+                syn_df = generator.generate(n_samples * 2)
+            except Exception as e:
+                print(f"Synthetic data generation failed: {str(e)}. Please try another model")
 
         return syn_df.dataframe()
 
@@ -275,15 +297,48 @@ class TabAutoSyn:
         self, 
         syn_data: pd.DataFrame, 
         real_data: pd.DataFrame,
+        n_generations: int = 20,
+        crossover_prob: int | float = 0.6,
+        bootstrap_sample_ratio: int | float = 0.9,
         target_column: str = None,
         verbose: bool = False
         ) -> pd.DataFrame:
 
-        config = GAConfig(n_generations=20, crossover_prob=0.6, bootstrap_sample_ratio=0.9, verbose=verbose)
+        config = GAConfig(n_generations=n_generations, crossover_prob=crossover_prob, bootstrap_sample_ratio=bootstrap_sample_ratio, verbose=verbose)
         ga = GeneticAlgorithm(config=config, target_col=target_column)
         results = ga.run(syn_data, real_data)
 
         return results
+
+    
+    def _extract_outliers(self, df: pd.DataFrame, columns: Any = None, threshold=1.5):
+        # If no columns specified, use all numeric columns
+        if columns is None:
+            columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        # Initialize mask with all False
+        outlier_mask = pd.Series([False] * len(df), index=df.index)
+        
+        for col in columns:
+            # Calculate Q1, Q3, and IQR
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            
+            # Define outlier boundaries
+            lower_bound = Q1 - threshold * IQR
+            upper_bound = Q3 + threshold * IQR
+            
+            # Identify outliers for this column
+            col_outliers = (df[col] < lower_bound) | (df[col] > upper_bound)
+            outlier_mask = outlier_mask | col_outliers
+        
+        # Extract outlier rows
+        outliers_df = df[outlier_mask].copy()
+
+        outliers_df = outliers_df.dropna()
+        
+        return outliers_df
 
 
     def generate(
@@ -295,7 +350,11 @@ class TabAutoSyn:
         log_params: bool = False,
         custom_metric: Metric = None,
         optimization_trials: int = None,
+        params: str = None,
         target_column: str = None,
+        n_generations: int = 20,
+        crossover_prob: int | float = 0.6,
+        bootstrap_sample_ratio: int | float = 0.9,
     ):
         """
         Generate synthetic data based on the provided training data.
@@ -311,6 +370,7 @@ class TabAutoSyn:
             log_params (bool): If True, persist HPO studies to disk.
             custom_metric (Metric, optional): Placeholder for custom quality metric.
             optimization_trials (int): Number of trials for HPO.
+            params (str): Path to existing optimization parameters.
             target_column (str, optional): Target column name for supervised setups.
 
         Returns:
@@ -330,25 +390,20 @@ class TabAutoSyn:
                 train_data = pd.read_csv(train_data_path, sep=sep)
 
                 if self.verbose:
-                    print(
-                        f"Loaded dataset with {len(train_data)} samples and {len(train_data.columns)} features"
-                    )
+                    print(f"Loaded dataset with {len(train_data)} samples and {len(train_data.columns)} features")
 
                 # Optimized preprocessing pipeline
                 train_data_mod = self._preprocess_data(train_data)
 
                 if self.verbose:
-                    print(
-                        f"After preprocessing: {len(train_data_mod)} samples and {len(train_data_mod.columns)} features"
-                    )
-                    print(
-                        f"Removed {len(train_data) - len(train_data_mod)} samples during preprocessing"
-                    )
+                    print(f"After preprocessing: {len(train_data_mod)} samples and {len(train_data_mod.columns)} features")
+                    print(f"Removed {len(train_data) - len(train_data_mod)} samples during preprocessing")
 
                 # Perform hyperparameter optimization for non-LLM model
-                if optimization_trials != None:
+                if optimization_trials != None and params == None:
                     if self.verbose and self.model != "LLM":
                         print("Starting hyperparameter optimization...")
+
 
                 if self.model == "task_specific":
                     if self.task == "privacy":
@@ -358,48 +413,273 @@ class TabAutoSyn:
                     elif self.task == "universal":
                         plugin_name = "ctgan"
 
-                # We need to extract outliers to make better distribution (### in progress ####)
-                # extractor = ExtractOutliers()
-                # outliers = extractor._extract_outliers(train_data=train_data_mod)
+                outliers = self._extract_outliers(df=train_data_mod, columns=train_data_mod.columns)
 
                 if self.model == "task_specific":
-                    syn_df_full = self._generate_synthetics_non_llm(
+                    syn_df = self._generate_synthetics_non_llm(
                         train_data=train_data_mod,
                         plugin_name=plugin_name,
                         optimization_trials=optimization_trials,
                         target_column=target_column,
                         n_samples=n_samples,
                         custom_metric=custom_metric,
+                        params=params,
                         log_params=log_params,
                     )
 
-                    # syn_outliers = self._generate_synthetics_non_llm(train_data=outliers,
-                    #                                                 plugin_name=plugin_name,
-                    #                                                 optimization_trials=optimization_trials,
-                    #                                                 target_column=target_column,
-                    #                                                 n_samples=n_samples,
-                    #                                                 custom_metric=custom_metric,
-                    #                                                 log_params=log_params)
-        
-                    # pre_curated_df = pd.concat([syn_df_full, syn_outliers], axis=1)
-
-                    # Start curation process
-                    if self.verbose:
-                        print(f'Starting evolutional optimization ...')
-
-                    final_curated_df = self._perform_curation(syn_data=syn_df_full, real_data=train_data_mod, target_column=target_column, verbose=self.verbose)
-
-                    return final_curated_df
+                    syn_outliers = self._generate_synthetics_non_llm(train_data=outliers,
+                                                                    plugin_name=plugin_name,
+                                                                    optimization_trials=optimization_trials,
+                                                                    target_column=target_column,
+                                                                    n_samples=n_samples,
+                                                                    custom_metric=custom_metric,
+                                                                    params=params,
+                                                                    log_params=log_params)
 
                 elif self.model == "LLM":
-                    syn_df_full = self._generate_synthetics_llm(
+                    syn_df = self._generate_synthetics_llm(
                         train_data=train_data_mod,
                         n_samples=n_samples,
-                        batch_size=batch_size,
+                        batch_size=batch_size
                     )
-                #     syn_outliers = self._generate_synthetics_llm(outliers)
+
+                    syn_outliers = self._generate_synthetics_llm(
+                        train_data=outliers,
+                        n_samples=n_samples,
+                        batch_size=batch_size
+                    )
+
+                syn_df_with_tails, _, _ = correct_tails_by_adding(df_real=train_data_mod,
+                                                            df_syn=syn_df,
+                                                            df_syn_tail=syn_outliers,
+                                                            divergence_metric="js",
+                                                            loss_scope="hybrid")
+
+                # Check classes for classification
+                real_classes = set(train_data_mod[target_column].unique())
+                syn_classes = set(syn_df_with_tails[target_column].unique())
+                
+                missing_in_syn = real_classes - syn_classes
+                extra_in_syn = syn_classes - real_classes
+
+                if not missing_in_syn and not extra_in_syn:
+                    if self.verbose:
+                        print("\nAll classes are similar in both datasets.")
+                    synthetic_filtered = syn_df_with_tails.copy()
+                    train_data_filtered = train_data_mod.copy()
+                else:
+                    if self.verbose:
+                        if missing_in_syn:
+                            print(f"\nThere are missing classes in synthetic dataset: {missing_in_syn}")
+                        if extra_in_syn:
+                            print(f"\nThere are extra classes in synthetic dataset: {extra_in_syn}")
+
+                    common_classes = real_classes.intersection(syn_classes)
+                    synthetic_filtered = syn_df_with_tails[syn_df_with_tails[target_column].isin(common_classes)].copy()
+                    train_data_filtered = train_data_mod[train_data_mod[target_column].isin(common_classes)].copy()
+
+                    if self.verbose:
+                        print(f'Real data target classes: {np.sort(train_data_filtered[target_column].unique())}')
+                        print(f'Synthetic dataset target classes: {np.sort(synthetic_filtered[target_column].unique())}')
+
+                # Start curation process
+                if self.verbose:
+                    print(f'\nStarting evolutional optimization ...')
+
+                syn_df_final = self._perform_curation(syn_data=synthetic_filtered, 
+                                                    real_data=train_data_filtered, 
+                                                    target_column=target_column,
+                                                    n_generations=n_generations,
+                                                    crossover_prob=crossover_prob,
+                                                    bootstrap_sample_ratio=bootstrap_sample_ratio,
+                                                    verbose=self.verbose)
+
+                return syn_df_final
+                    
+            except Exception as e:
+                raise ValueError(f"Error generating synthetic data: {str(e)}")
+
+
+    def run_generator(
+        self,
+        train_data_path: str = None,
+        run_preprocessing: bool = True,
+        generate_tails: bool = False,
+        sep: str = ",",
+        n_samples: int = 100,
+        batch_size: int = 10,
+        log_params: bool = False,
+        custom_metric: Metric = None,
+        optimization_trials: int = None,
+        params: str = None,
+        target_column: str = None,
+    ):
+
+        if train_data_path is not None:
+            try:
+                # Load data with error handling
+                train_data = pd.read_csv(train_data_path, sep=sep)
+
+                if self.verbose:
+                    print(f"Loaded dataset with {len(train_data)} samples and {len(train_data.columns)} features")
+
+                if run_preprocessing:
+                    train_data_mod = self._preprocess_data(train_data)
+                    if self.verbose:
+                        print(f"After preprocessing: {len(train_data_mod)} samples and {len(train_data_mod.columns)} features")
+                        print(f"Removed {len(train_data) - len(train_data_mod)} samples during preprocessing")
+
+                # Perform hyperparameter optimization for non-LLM model
+                if optimization_trials != None and params == None:
+                    if self.verbose and self.model != "LLM":
+                        print("Starting hyperparameter optimization...")
+
+
+                if self.model == "task_specific":
+                    if self.task == "privacy":
+                        plugin_name = "dpgan"
+                    elif self.task == "ml":
+                        plugin_name = "ddpm"
+                    elif self.task == "universal":
+                        plugin_name = "ctgan"
+
+                if generate_tails:
+                    outliers = self._extract_outliers(df=train_data_mod if run_preprocessing else train_data, columns=train_data_mod.columns if run_preprocessing else train_data.columns)
+
+                    outliers = outliers.dropna()
+
+                    if self.model == "task_specific":
+                        syn_outliers = self._generate_synthetics_non_llm(
+                            train_data=outliers,
+                            plugin_name=plugin_name,
+                            optimization_trials=optimization_trials,
+                            target_column=target_column,
+                            n_samples=n_samples,
+                            custom_metric=custom_metric,
+                            params=params,
+                            log_params=log_params)
+                        
+                        syn_outliers = syn_outliers.dropna()
+
+                        return syn_outliers
+                    
+                    elif self.model == "LLM":
+                        syn_outliers = self._generate_synthetics_llm(
+                            train_data=outliers,
+                            n_samples=n_samples,
+                            batch_size=batch_size,
+                        )
+
+                        syn_outliers = syn_outliers.dropna()
+
+                        return syn_outliers
+
+                else:
+                    if self.model == "task_specific":
+                        syn_df = self._generate_synthetics_non_llm(
+                            train_data=train_data_mod if run_preprocessing else train_data,
+                            plugin_name=plugin_name,
+                            optimization_trials=optimization_trials,
+                            target_column=target_column,
+                            n_samples=n_samples,
+                            custom_metric=custom_metric,
+                            params=params,
+                            log_params=log_params)
+                        
+                        syn_df = syn_df.dropna()
+
+                        return syn_df
+                    
+                    elif self.model == "LLM":
+                        syn_df = self._generate_synthetics_llm(
+                            train_data=train_data_mod if run_preprocessing else train_data,
+                            n_samples=n_samples,
+                            batch_size=batch_size,
+                        )
+
+                        syn_df = syn_df.dropna()
+
+                        return syn_df
 
             except Exception as e:
-                raise ValueError(f"Error loading or preprocessing data: {str(e)}")
+                raise ValueError(f"Error while generating synthetic data: {str(e)}")
 
-        return syn_df_full
+    
+    def run_outliers_extension(
+        self,
+        real_data: pd.DataFrame | None = None,
+        syn_data_full: pd.DataFrame | None = None,
+        syn_outliers: pd.DataFrame | None = None,
+        divergence_metric: str = "js",
+        compare_metric: str = 'mi',
+        loss_scope: str = "hybrid"
+    ):
+        if real_data is None or syn_data_full is None or syn_outliers is None:
+            raise ValueError("Missing required data: real_data, syn_data_full, and syn_outliers must all be provided")
+
+        try:       
+            syn_df_with_tails, _, _ = correct_tails_by_adding(df_real=real_data,
+                                                                df_syn=syn_data_full,
+                                                                df_syn_tail=syn_outliers,
+                                                                compare_metric=compare_metric,
+                                                                divergence_metric=divergence_metric,
+                                                                loss_scope=loss_scope,
+                                                                verbose=self.verbose)
+            return syn_df_with_tails
+
+        except Exception as e:
+            raise ValueError(f"Error while extending synthetic outliers: {str(e)}")
+
+
+    def run_evolutional_optimization(
+        self,
+        real_data: pd.Dataframe | None = None,
+        syn_data: pd.DataFrame | None = None,
+        n_generations: int = 20,
+        crossover_prob: int | float = 0.6,
+        bootstrap_sample_ratio: int | float = 0.9,
+        target_column: str = None,
+    ):
+
+        real_classes = set(real_data[target_column].unique())
+        syn_classes = set(syn_data[target_column].unique())
+        
+        missing_in_syn = real_classes - syn_classes
+        extra_in_syn = syn_classes - real_classes
+
+        if not missing_in_syn and not extra_in_syn:
+            if self.verbose:
+                print("\nAll classes are similar in both datasets.")
+            synthetic_filtered = syn_data.copy()
+            real_data_filtered = real_data.copy()
+        else:
+            if self.verbose:
+                if missing_in_syn:
+                    print(f"\nThere are missing classes in synthetic dataset: {missing_in_syn}")
+                if extra_in_syn:
+                    print(f"\nThere are extra classes in synthetic dataset: {extra_in_syn}")
+
+            common_classes = real_classes.intersection(syn_classes)
+            synthetic_filtered = syn_data[syn_data[target_column].isin(common_classes)].copy()
+            real_data_filtered = real_data[real_data[target_column].isin(common_classes)].copy()
+
+            if self.verbose:
+                print(f'Real data target classes: {np.sort(real_data_filtered[target_column].unique())}')
+                print(f'Synthetic dataset target classes: {np.sort(synthetic_filtered[target_column].unique())}')
+
+        # Start curation process
+        if self.verbose:
+            print(f'\nStarting evolutional optimization ...')
+
+        syn_df_final = self._perform_curation(
+            syn_data=synthetic_filtered, 
+            real_data=real_data_filtered,
+            n_generations=n_generations,
+            crossover_prob=crossover_prob,
+            bootstrap_sample_ratio=bootstrap_sample_ratio,
+            target_column=target_column, 
+            verbose=self.verbose)
+
+        return syn_df_final
+
+

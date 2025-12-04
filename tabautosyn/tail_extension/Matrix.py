@@ -6,6 +6,7 @@ from scipy.stats import wasserstein_distance, entropy
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics.pairwise import cosine_similarity
+
 # ---------- Вспомогательные функции ----------
 def js_divergence(p, q):
     """Дивергенция Йенсена–Шеннона между двумя распределениями."""
@@ -91,10 +92,6 @@ def matrix_eigenvalue_mse(real_df, synth_df, metric='mi', show_plots=False):
     eig_real = np.sort(np.real(np.linalg.eigvals(mat_real)))[::-1]
     eig_synth = np.sort(np.real(np.linalg.eigvals(mat_synth)))[::-1]
     mse = mean_squared_error(eig_real, eig_synth)
-
-    # Визуализация
-    if show_plots:
-        plot_mi_and_eigs(mat_real, mat_synth, eig_real, eig_synth, mse, metric)
 
     return mat_real, mat_synth, eig_real, eig_synth, mse
 
