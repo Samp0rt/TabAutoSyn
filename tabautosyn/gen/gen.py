@@ -5,6 +5,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
+
 # from deap import base, creator, tools
 from .individ import Individual
 from .fitness import FitnessEvaluator, MLFitnessEvaluator
@@ -15,7 +16,9 @@ from .selection import SelectionOperator, TournamentSelection
 from rich.console import Console
 
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class GAConfig:
@@ -148,11 +151,13 @@ class GeneticAlgorithm:
             feature_cols = [c for c in syn_data.columns if c != self.target_col]
         self.feature_cols = feature_cols
 
-        syn_data, real_data = filter_rare_classes(syn_data, real_data, target_col=self.target_col)
+        syn_data, real_data = filter_rare_classes(
+            syn_data, real_data, target_col=self.target_col
+        )
 
         # Create initial population via bootstrap if not provided
         if initial_population is None:
-        
+
             max_attempts = 5
             target_classes = set(syn_data[self.target_col].unique())
             initial_population = None
@@ -162,14 +167,19 @@ class GeneticAlgorithm:
                 initial_population = bootstrap_sample(
                     syn_data,
                     n_samples=self.config.n_bootstrap_samples,
-                    sample_ratio=self.config.bootstrap_sample_ratio
+                    sample_ratio=self.config.bootstrap_sample_ratio,
                 )
 
                 # Ensure every bootstrap sample includes all target classes
-                if all(target_classes.issubset(set(df[self.target_col].unique())) for df in initial_population):
+                if all(
+                    target_classes.issubset(set(df[self.target_col].unique()))
+                    for df in initial_population
+                ):
                     valid_population = True
                     if self.config.verbose:
-                        logger.info(f"Initial population successfully created on attempt {attempt}.")
+                        logger.info(
+                            f"Initial population successfully created on attempt {attempt}."
+                        )
                     break
                 else:
                     logger.warning(
@@ -217,7 +227,9 @@ class GeneticAlgorithm:
                     self.history["avg"].append(np.mean(fitness_values))
 
                     if self.config.verbose:
-                        console.log(f"Gen {gen}: max={self.history['max'][-1]:.4f}, avg={self.history['avg'][-1]:.4f}")
+                        console.log(
+                            f"Gen {gen}: max={self.history['max'][-1]:.4f}, avg={self.history['avg'][-1]:.4f}"
+                        )
 
         # Results
         population.sort(key=lambda ind: ind.fitness_value, reverse=True)
@@ -237,7 +249,7 @@ class GeneticAlgorithm:
 
     def plot_history(self):
         """Visualize algorithm progress"""
-        plt.figure(figsize=(10, 5)) 
+        plt.figure(figsize=(10, 5))
         generations = range(1, len(self.history["max"]) + 1)
         plt.plot(generations, self.history["max"], label="Max Fitness", linewidth=2)
         plt.plot(generations, self.history["avg"], label="Avg Fitness", linewidth=2)
@@ -271,7 +283,7 @@ def create_global_pool(
     for df in dataframes:
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
             global_pool.add(tuple(row))
-            
+
     return list(global_pool)
 
 
@@ -282,7 +294,7 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_train_filtered, df_test_filtered : (pd.DataFrame, pd.DataFrame)
 
     """
-    min_count=len(df_train)*0.015
+    min_count = len(df_train) * 0.015
     class_counts = df_train[target_col].value_counts()
 
     valid_classes = class_counts[class_counts >= min_count].index
