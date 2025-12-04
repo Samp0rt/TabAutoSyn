@@ -143,11 +143,13 @@ class GeneticAlgorithm:
             feature_cols = [c for c in df_train.columns if c != self.target_col]
         self.feature_cols = feature_cols
 
-        df_train, df_test = filter_rare_classes(df_train, df_test, target_col=self.target_col)
-        
+        df_train, df_test = filter_rare_classes(
+            df_train, df_test, target_col=self.target_col
+        )
+
         # Create initial population via bootstrap if not provided
         if initial_population is None:
-        
+
             max_attempts = 5
             target_classes = set(df_train[self.target_col].unique())
             initial_population = None
@@ -157,14 +159,19 @@ class GeneticAlgorithm:
                 initial_population = bootstrap_sample(
                     df_train,
                     n_samples=self.config.n_bootstrap_samples,
-                    sample_ratio=self.config.bootstrap_sample_ratio
+                    sample_ratio=self.config.bootstrap_sample_ratio,
                 )
 
                 # Ensure every bootstrap sample includes all target classes
-                if all(target_classes.issubset(set(df[self.target_col].unique())) for df in initial_population):
+                if all(
+                    target_classes.issubset(set(df[self.target_col].unique()))
+                    for df in initial_population
+                ):
                     valid_population = True
                     if self.config.verbose:
-                        logging.info(f"Initial population successfully created on attempt {attempt}.")
+                        logging.info(
+                            f"Initial population successfully created on attempt {attempt}."
+                        )
                     break
                 else:
                     logging.warning(
@@ -268,6 +275,7 @@ def create_global_pool(
             global_pool.add(tuple(row))
     return list(global_pool)
 
+
 def filter_rare_classes(df_train, df_test, target_col):
     """
     Return:
@@ -275,7 +283,7 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_train_filtered, df_test_filtered : (pd.DataFrame, pd.DataFrame)
 
     """
-    min_count=len(df_train)*0.015
+    min_count = len(df_train) * 0.015
     class_counts = df_train[target_col].value_counts()
 
     valid_classes = class_counts[class_counts >= min_count].index
@@ -284,4 +292,3 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_test_filtered = df_test[df_test[target_col].isin(valid_classes)].copy()
 
     return df_train_filtered, df_test_filtered
-

@@ -32,7 +32,7 @@ class ExchangeCrossover(CrossoverOperator):
         idxs2 = random.sample(range(size), k)
 
         for a, b in zip(idxs1, idxs2):
-          '''  row1, row2 = ind1[a], ind2[b]
+            """row1, row2 = ind1[a], ind2[b]
 
             # Avoid duplicates
             if row2 in ind1.data:
@@ -45,8 +45,7 @@ class ExchangeCrossover(CrossoverOperator):
                 if alternatives:
                     row1 = random.choice(alternatives)
 
-            ind1[a], ind2[b] = row2, row1'''
+            ind1[a], ind2[b] = row2, row1"""
             ind1[a], ind2[b] = ind2[b], ind1[a]
 
         return ind1, ind2
-

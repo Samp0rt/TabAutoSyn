@@ -27,11 +27,18 @@ class MLFitnessEvaluator(FitnessEvaluator):
         self.target_col = target_col
 
     _ensure_1d_labels = staticmethod(
-        lambda y: np.argmax(y, axis=1) if (y := np.asarray(y)).ndim == 2 and y.shape[1] > 1 else y.ravel())
+        lambda y: (
+            np.argmax(y, axis=1)
+            if (y := np.asarray(y)).ndim == 2 and y.shape[1] > 1
+            else y.ravel()
+        )
+    )
 
     @staticmethod
     def _sum_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
-        y_true, y_score = MLFitnessEvaluator._ensure_1d_labels(y_true), np.asarray(y_score)
+        y_true, y_score = MLFitnessEvaluator._ensure_1d_labels(y_true), np.asarray(
+            y_score
+        )
         if np.unique(y_true).size < 2:
             return None
         try:
@@ -39,7 +46,9 @@ class MLFitnessEvaluator(FitnessEvaluator):
                 return float(roc_auc_score(y_true, y_score))
             if y_score.shape[1] == 2:
                 return float(roc_auc_score(y_true, y_score[:, 1]))
-            return float(roc_auc_score(y_true, y_score, multi_class="ovr", average="macro"))
+            return float(
+                roc_auc_score(y_true, y_score, multi_class="ovr", average="macro")
+            )
         except Exception:
             return None
 
@@ -56,7 +65,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
 
         # Logistic Regression
         try:
-            
+
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=FutureWarning)
                 warnings.filterwarnings("ignore", category=UserWarning)
@@ -106,4 +115,3 @@ class MLFitnessEvaluator(FitnessEvaluator):
         y_test = le.transform(y_test)
 
         return self._fit_and_score(X_train, y_train, X_test, y_test)
-
