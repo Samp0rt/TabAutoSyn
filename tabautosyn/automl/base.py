@@ -1,4 +1,3 @@
-from tabnanny import verbose
 import pandas as pd
 import numpy as np
 import joblib
@@ -151,7 +150,7 @@ class TabAutoSyn:
         plugin_name: str = "gpt-oss:20b",
         n_samples: int = 100,
         batch_size: int = 10,
-    ) -> pd.DataFrame:  ### in progress ####
+    ) -> pd.DataFrame:  
         """
         Generate synthetic data using LLM.
 
@@ -187,13 +186,14 @@ class TabAutoSyn:
         self,
         train_data: pd.DataFrame,
         plugin_name: str,
+        task_type: str,
         optimization_trials: int = None,
         target_column: str = None,
         n_samples: int = 100,
         custom_metric: Metric = None,
         params: str = None,
         log_params: bool = False,
-    ) -> pd.DataFrame:  ### in progress ####
+    ) -> pd.DataFrame:  
         """
         Generate synthetic data using non-LLM `synthcity` plugins with optional HPO.
 
@@ -272,8 +272,8 @@ class TabAutoSyn:
 
         train_loader = GenericDataLoader(train_data, target_column=target_column)
 
-        # if plugin_name == "ddpm" and ml_task == "classification":
-        #     init_kwargs['ddpm']['is_classification'] = True
+        if plugin_name == "ddpm" and task_type == "classification":
+            init_kwargs['ddpm']['is_classification'] = True
 
         # if init_kwargs[plugin_name] != {}:
         try:
@@ -688,7 +688,7 @@ class TabAutoSyn:
 
     def run_evolutional_optimization(
         self,
-        real_data: pd.Dataframe | None = None,
+        real_data: pd.DataFrame | None = None,
         syn_data: pd.DataFrame | None = None,
         n_generations: int = 20,
         crossover_prob: int | float = 0.6,
