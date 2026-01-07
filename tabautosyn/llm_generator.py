@@ -5,6 +5,7 @@ import random
 import logging
 from tqdm import tqdm
 from openai import OpenAI
+import re
 
 
 def has_curly_brace(text: str) -> bool:
@@ -18,6 +19,12 @@ def has_curly_brace(text: str) -> bool:
         bool: True if the text contains '{' or '}', False otherwise.
     """
     return "{" in text or "}" in text
+
+
+_INVALID_VALUE_RE = re.compile(r'"\s*:\s*(,|\}|\])')
+
+def has_empty_value(json_str: str) -> bool:
+    return bool(_INVALID_VALUE_RE.search(json_str))
 
 
 def extract_json_objects(text: str) -> list:
@@ -49,6 +56,8 @@ def extract_json_objects(text: str) -> list:
                 stack.pop()
                 if not stack:
                     json_str = text[start_index : i + 1]
+                    if has_empty_value(json_str):
+                        break
                     try:
                         obj = json.loads(json_str)
                         json_objects.append(obj)
@@ -224,34 +233,44 @@ class LLMGenerator:
             sample = self.row2dict(sampled_rows)
             sys_info, user_info = self.instruction(sample, current_batch_size)
 
-            resp_temp = self.gen_client.chat.completions.create(
-                model=self.gen_model_nm,
-                messages=[
-                    {"role": "system", "content": sys_info},
-                    {"role": "user", "content": user_info},
-                ],
-                temperature=self.gen_temperature,
-                n=1,
-                max_tokens=5000,
-            )
+            for i in range(5): # 5 iterations to recieve valid json (else skip)
+                try:
+                    resp_temp = self.gen_client.chat.completions.create(
+                        model=self.gen_model_nm,
+                        messages=[
+                            {"role": "system", "content": sys_info},
+                            {"role": "user", "content": user_info},
+                        ],
+                        temperature=self.gen_temperature,
+                        n=1,
+                        max_tokens=5000,
+                    )
 
-            content = resp_temp.choices[0].message.content
-            if content is not None:
-                json_objects = extract_json_objects(content)
-                if json_objects:
-                    # Ensure we don't exceed the target number of samples
-                    if len(json_objects) > current_batch_size:
-                        json_objects = json_objects[:current_batch_size]
-                    res.append(json_objects)
-                    samples_generated += len(json_objects)
-                else:
+                    content = resp_temp.choices[0].message.content
+                    if content is not None:
+                        json_objects = extract_json_objects(content)
+                        if json_objects == []:
+                            continue
+                        elif json_objects:
+                            # Ensure we don't exceed the target number of samples
+                            if len(json_objects) > current_batch_size:
+                                json_objects = json_objects[:current_batch_size]
+                            res.append(json_objects)
+                            samples_generated += len(json_objects)
+                            break
+                except:
                     if self.verbose:
                         self.logger.warning(
                             f"No valid JSON objects found in response for batch starting at {j}"
                         )
-            else:
-                if self.verbose:
-                    self.logger.error("Response is None")
+            #     else: 
+            #         if self.verbose:
+            #             self.logger.warning(
+            #                 f"No valid JSON objects found in response for batch starting at {j}"
+            #             )
+            # else:
+            #     if self.verbose:
+            #         self.logger.error("Response is None")
 
         return res
 
@@ -277,59 +296,104 @@ class LLMGenerator:
                 stack.pop()
         return stack == []
 
+
     def _generate_additional_samples(self, additional_needed: int, batch_size: int):
         """
-        Generate additional samples when the initial generation falls short.
-
-        This private method is called when the initial generation doesn't produce
-        enough samples. It uses a random sample from the real data as an example
-        and generates the exact number of additional samples needed.
-
-        Args:
-            additional_needed (int): Number of additional samples needed.
-            batch_size (int): Batch size for generation.
-
-        Returns:
-            list: List of additional generated samples.
+        Generate additional samples until the exact number of valid samples is reached
+        or the maximum number of attempts is exhausted.
         """
         additional_records = []
+        max_attempts = 10 
 
-        # Use a random sample from real data as example
+        if additional_needed <= 0:
+            return additional_records
+
+        # Use a random sample from real data as example 
         sample_idx = random.randint(0, len(self.real_data) - 1)
         sampled_rows = self.real_data.loc[
             sample_idx : sample_idx + min(batch_size, len(self.real_data)) - 1,
             self.cols,
         ].copy()
         sample = self.row2dict(sampled_rows)
-        sys_info, user_info = self.instruction(sample, additional_needed)
 
-        resp_temp = self.gen_client.chat.completions.create(
-            model=self.gen_model_nm,
-            messages=[
-                {"role": "system", "content": sys_info},
-                {"role": "user", "content": user_info},
-            ],
-            temperature=self.gen_temperature,
-            n=1,
-            max_tokens=5000,
-        )
+        attempts = 0
+        while len(additional_records) < additional_needed and attempts < max_attempts:
+            attempts += 1
+            remaining = additional_needed - len(additional_records)
 
-        content = resp_temp.choices[0].message.content
-        if content is not None:
-            json_objects = extract_json_objects(content)
-            if json_objects:
-                # Take only the number we need
-                additional_records = json_objects[:additional_needed]
-            else:
+            sys_info, user_info = self.instruction(sample, remaining)
+
+            try:
+                resp_temp = self.gen_client.chat.completions.create(
+                    model=self.gen_model_nm,
+                    messages=[
+                        {"role": "system", "content": sys_info},
+                        {"role": "user", "content": user_info},
+                    ],
+                    temperature=self.gen_temperature,
+                    n=1,
+                    max_tokens=5000,
+                )
+
+                content = resp_temp.choices[0].message.content
+                if content is None:
+                    if self.verbose:
+                        self.logger.warning("Additional generation response content is None")
+                    continue
+
+                json_objects = extract_json_objects(content)
+                if not json_objects:
+                    if self.verbose:
+                        self.logger.warning("No JSON objects extracted from response")
+                    continue
+
+                valid = []
+                for obj in json_objects:
+                    if self._is_valid_sample(obj): 
+                        valid.append(obj)
+
+                if not valid:
+                    if self.verbose:
+                        self.logger.warning("All generated samples were invalid (NaN/empty)")
+                    continue
+
+                take = min(remaining, len(valid))
+                additional_records.extend(valid[:take])
+
+            except Exception as e:
                 if self.verbose:
                     self.logger.warning(
-                        f"No valid JSON objects found in additional generation response"
+                        f"Error during additional generation attempt {attempts}: {e}"
                     )
-        else:
-            if self.verbose:
-                self.logger.error("Additional generation response is None")
+
+        if len(additional_records) < additional_needed and self.verbose:
+            self.logger.warning(
+                f"Requested {additional_needed} additional samples, "
+                f"but only generated {len(additional_records)} valid ones "
+                f"after {max_attempts} attempts"
+            )
 
         return additional_records
+
+
+    def _is_valid_sample(self, sample: dict) -> bool:
+        """
+        Check if generated sample is valid (no NaNs / missing required columns).
+        """
+        for col in self.cols:
+            if col not in sample:
+                return False
+            val = sample[col]
+            if val is None:
+                return False
+            if isinstance(val, float):
+                if pd.isna(val):
+                    return False
+            if isinstance(val, str) and (val.strip() == "" or val.strip().lower() == "nan"):
+                return False
+
+        return True
+
 
     def generate(self, n_samples: int, batch_size: int) -> pd.DataFrame:
         """
@@ -349,16 +413,57 @@ class LLMGenerator:
         """
         syn_res = self.run(n_samples=n_samples, batch_size=batch_size)
 
+        # records = []
+        # for sublist in syn_res:
+        #     if sublist:
+        #         records.extend(sublist)
+
+        # # Ensure we have exactly n_samples
+        # if len(records) < n_samples:
+        #     if self.verbose:
+        #         self.logger.warning(
+        #             f"Generated only {len(records)} samples, requested {n_samples}. Generating additional samples..."
+        #         )
+        #     # Generate additional samples to reach n_samples
+        #     additional_needed = n_samples - len(records)
+        #     additional_records = self._generate_additional_samples(
+        #         additional_needed, batch_size
+        #     )
+        #     records.extend(additional_records)
+        # elif len(records) > n_samples:
+        #     if self.verbose:
+        #         self.logger.warning(
+        #             f"Generated {len(records)} samples, requested {n_samples}. Truncating to {n_samples}"
+        #         )
+        #     records = records[:n_samples]
+
+        # df_syn = pd.DataFrame(records, columns=list(self.real_data.columns))
+
+        # return df_syn
+
+
         records = []
         for sublist in syn_res:
             if sublist:
-                records.extend(sublist)
+                # Filter out records containing NaN values
+                valid_records = [
+                    record for record in sublist 
+                    if not any(pd.isna(val) for val in record.values() if isinstance(record, dict))
+                ]
+                records.extend(valid_records)
+
+        # Track how many samples were filtered out
+        filtered_count = sum(len(sublist) for sublist in syn_res if sublist) - len(records)
+        if filtered_count > 0 and self.verbose:
+            self.logger.warning(
+                f"Filtered out {filtered_count} samples containing NaN values"
+            )
 
         # Ensure we have exactly n_samples
         if len(records) < n_samples:
             if self.verbose:
                 self.logger.warning(
-                    f"Generated only {len(records)} samples, requested {n_samples}. Generating additional samples..."
+                    f"Generated only {len(records)} valid samples, requested {n_samples}. Generating additional samples..."
                 )
             # Generate additional samples to reach n_samples
             additional_needed = n_samples - len(records)
@@ -374,5 +479,20 @@ class LLMGenerator:
             records = records[:n_samples]
 
         df_syn = pd.DataFrame(records, columns=list(self.real_data.columns))
+
+        # Final validation check for any remaining NaN values
+        if df_syn.isnull().values.any():
+            if self.verbose:
+                self.logger.warning(
+                    f"Final DataFrame contains {df_syn.isnull().sum().sum()} NaN values. Removing affected rows..."
+                )
+            df_syn = df_syn.dropna()
+            
+            # If we lost too many rows, regenerate
+            if len(df_syn) < n_samples:
+                shortage = n_samples - len(df_syn)
+                additional_records = self._generate_additional_samples(shortage, batch_size)
+                df_additional = pd.DataFrame(additional_records, columns=list(self.real_data.columns))
+                df_syn = pd.concat([df_syn, df_additional], ignore_index=True).iloc[:n_samples]
 
         return df_syn
