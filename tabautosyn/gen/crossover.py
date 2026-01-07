@@ -1,6 +1,6 @@
 import random
 from typing import Tuple
-from gen.individ import Individual
+from .individ import Individual
 from abc import ABC, abstractmethod
 
 

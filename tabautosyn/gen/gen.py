@@ -1,15 +1,23 @@
 import random
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
-from deap import base, creator, tools
-from gen.individ import Individual
-from gen.fitness import FitnessEvaluator, MLFitnessEvaluator
-from gen.crossover import CrossoverOperator, ExchangeCrossover
-from gen.mutation import MutationOperator, ReplacementMutation
-from gen.selection import SelectionOperator, TournamentSelection
+
+# from deap import base, creator, tools
+from .individ import Individual
+from .fitness import FitnessEvaluator, MLFitnessEvaluator
+from .crossover import CrossoverOperator, ExchangeCrossover
+from .mutation import MutationOperator, ReplacementMutation
+from .selection import SelectionOperator, TournamentSelection
+
+from rich.console import Console
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -124,40 +132,40 @@ class GeneticAlgorithm:
 
     def run(
         self,
-        df_train: pd.DataFrame,
-        df_test: pd.DataFrame,
+        syn_data: pd.DataFrame,
+        real_data: pd.DataFrame,
         feature_cols: Optional[List[str]] = None,
         initial_population: Optional[List[pd.DataFrame]] = None,
     ) -> List[GAResult]:
         """Run genetic algorithm
 
         Args:
-            df_train: Training data
-            df_test: Test data
+            syn_data: Training data
+            real_data: Test data
             feature_cols: List of feature columns (if None, all except target_col)
             initial_population: Initial population (if None, created via bootstrap)
         """
 
         # Determine feature columns
         if feature_cols is None:
-            feature_cols = [c for c in df_train.columns if c != self.target_col]
+            feature_cols = [c for c in syn_data.columns if c != self.target_col]
         self.feature_cols = feature_cols
 
-        df_train, df_test = filter_rare_classes(
-            df_train, df_test, target_col=self.target_col
+        syn_data, real_data = filter_rare_classes(
+            syn_data, real_data, target_col=self.target_col
         )
 
         # Create initial population via bootstrap if not provided
         if initial_population is None:
 
             max_attempts = 5
-            target_classes = set(df_train[self.target_col].unique())
+            target_classes = set(syn_data[self.target_col].unique())
             initial_population = None
             valid_population = False
 
             for attempt in range(1, max_attempts + 1):
                 initial_population = bootstrap_sample(
-                    df_train,
+                    syn_data,
                     n_samples=self.config.n_bootstrap_samples,
                     sample_ratio=self.config.bootstrap_sample_ratio,
                 )
@@ -169,17 +177,17 @@ class GeneticAlgorithm:
                 ):
                     valid_population = True
                     if self.config.verbose:
-                        logging.info(
+                        logger.info(
                             f"Initial population successfully created on attempt {attempt}."
                         )
                     break
                 else:
-                    logging.warning(
+                    logger.warning(
                         f"Attempt {attempt}/{max_attempts}: not all target classes are present in bootstrap samples."
                     )
 
             if not valid_population:
-                logging.error(
+                logger.error(
                     f"Failed to create initial_population with all target classes after {max_attempts} attempts. "
                     "Continuing with the last generated population."
                 )
@@ -203,23 +211,25 @@ class GeneticAlgorithm:
         ]
 
         # Initial evaluation
-        self._evaluate_population(population, df_test)
+        self._evaluate_population(population, real_data)
 
         # Evolution
-        for gen in range(1, self.config.n_generations + 1):
-            population = self._evolve_generation(population)
-            self._evaluate_population(population, df_test)
+        if self.config.verbose:
+            console = Console()
+            with console.status("[bold green]Working on tasks...") as status:
+                for gen in range(1, self.config.n_generations + 1):
+                    population = self._evolve_generation(population)
+                    self._evaluate_population(population, real_data)
 
-            # Statistics
-            fitness_values = [ind.fitness_value for ind in population]
-            self.history["max"].append(max(fitness_values))
-            self.history["avg"].append(np.mean(fitness_values))
+                    # Statistics
+                    fitness_values = [ind.fitness_value for ind in population]
+                    self.history["max"].append(max(fitness_values))
+                    self.history["avg"].append(np.mean(fitness_values))
 
-            if self.config.verbose:
-                print(
-                    f"Gen {gen}: max={self.history['max'][-1]:.4f} "
-                    f"avg={self.history['avg'][-1]:.4f}"
-                )
+                    if self.config.verbose:
+                        console.log(
+                            f"Gen {gen}: max={self.history['max'][-1]:.4f}, avg={self.history['avg'][-1]:.4f}"
+                        )
 
         # Results
         population.sort(key=lambda ind: ind.fitness_value, reverse=True)
@@ -273,6 +283,7 @@ def create_global_pool(
     for df in dataframes:
         for row in df[feature_cols + [target_col]].itertuples(index=False, name=None):
             global_pool.add(tuple(row))
+
     return list(global_pool)
 
 

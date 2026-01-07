@@ -3,7 +3,7 @@ import pandas as pd
 import xgboost as xgb
 import warnings
 from typing import Optional
-from gen.individ import Individual
+from .individ import Individual
 from abc import ABC, abstractmethod
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
