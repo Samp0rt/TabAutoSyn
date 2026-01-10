@@ -164,7 +164,7 @@ class GeneticAlgorithm:
             valid_population = False
 
             for attempt in range(1, max_attempts + 1):
-                initial_population = randon_subsampling(
+                initial_population = random_subsampling(
                     syn_data,
                     n_samples=self.config.n_bootstrap_samples,
                     sample_ratio=self.config.bootstrap_sample_ratio,
@@ -274,7 +274,7 @@ def bootstrap_sample(
         bootstrap_samples.append(sample)
     return bootstrap_samples
 
-def randon_subsampling(data: pd.DataFrame, n_samples: int = 10, 
+def random_subsampling(data: pd.DataFrame, n_samples: int = 10, 
                      sample_ratios: list = None):
     
     if sample_ratios is None:
@@ -322,3 +322,4 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_test_filtered = df_test[df_test[target_col].isin(valid_classes)].copy()
 
     return df_train_filtered, df_test_filtered
+
