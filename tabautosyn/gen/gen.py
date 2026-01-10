@@ -9,7 +9,7 @@ from dataclasses import dataclass
 # from deap import base, creator, tools
 from .individ import Individual
 from .fitness import FitnessEvaluator, MLFitnessEvaluator
-from .crossover import CrossoverOperator, ExchangeCrossover
+from .crossover import CrossoverOperator, ExchangeCrossover,UniqueExchangeCrossover
 from .mutation import MutationOperator, ReplacementMutation
 from .selection import SelectionOperator, TournamentSelection
 
@@ -35,13 +35,13 @@ class GAConfig:
     """
 
     n_generations: int = 50
-    crossover_prob: float = 0.7
+    crossover_prob: float = 1.0
     mutation_prob: float = 0.02
     tournament_size: int = 3
     population_size: Optional[int] = None
     verbose: bool = True
     n_bootstrap_samples: int = 50
-    bootstrap_sample_ratio: float = 0.7
+    bootstrap_sample_ratio: list = None
     exchange_rate_range: Tuple[float, float] = (0.05, 0.3)
     mutation_rate: float = 0.05
 
@@ -82,7 +82,7 @@ class GeneticAlgorithm:
 
         # Default components
         self.fitness_evaluator = fitness_evaluator or MLFitnessEvaluator(target_col)
-        self.crossover_operator = crossover_operator or ExchangeCrossover(
+        self.crossover_operator = crossover_operator or UniqueExchangeCrossover(
             exchange_rate_range=self.config.exchange_rate_range
         )
         self.selection_operator = selection_operator or TournamentSelection(
@@ -164,7 +164,7 @@ class GeneticAlgorithm:
             valid_population = False
 
             for attempt in range(1, max_attempts + 1):
-                initial_population = bootstrap_sample(
+                initial_population = random_subsampling(
                     syn_data,
                     n_samples=self.config.n_bootstrap_samples,
                     sample_ratio=self.config.bootstrap_sample_ratio,
@@ -274,6 +274,25 @@ def bootstrap_sample(
         bootstrap_samples.append(sample)
     return bootstrap_samples
 
+def random_subsampling(data: pd.DataFrame, n_samples: int = 10, 
+                     sample_ratios: list = None):
+    
+    if sample_ratios is None:
+        sample_ratios = [0.5, 0.6, 0.7, 0.8, 0.9]
+    
+    bootstrap_samples = {}
+    
+    for ratio in sample_ratios:
+        n = int(len(data) * ratio)
+        samples = []
+        for _ in range(n_samples):
+            indices = np.random.choice(len(data), size=n, replace=False)
+            sample = data.iloc[indices].reset_index(drop=True)
+            samples.append(sample)
+        bootstrap_samples[ratio] = samples
+   
+    return bootstrap_samples
+
 
 def create_global_pool(
     dataframes: List[pd.DataFrame], feature_cols: List[str], target_col: str
@@ -303,3 +322,4 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_test_filtered = df_test[df_test[target_col].isin(valid_classes)].copy()
 
     return df_train_filtered, df_test_filtered
+
