@@ -1,4 +1,4 @@
-! [logo](assets/image.png)
+![logo](assets/image.png)
 
 # 📊 TabAutoSyn
 
