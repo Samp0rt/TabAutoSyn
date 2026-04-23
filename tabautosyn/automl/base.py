@@ -1017,7 +1017,7 @@ class TabAutoSyn:
             pipeline_trace = None
             try:
                 pipeline_started_at = datetime.now()
-                plugins = ["ctgan"]  # , "ddpm", "dpgan"]
+                plugins = ["ctgan", "ddpm", "dpgan"]
                 plugin_summaries: list[dict[str, Any]] = []
                 try:
                     langfuse_client = get_langfuse_judge_client()
@@ -1086,17 +1086,17 @@ class TabAutoSyn:
                     )
 
                 dataset_processor = DatasetProcessor()
-                # train_data_mod, _ = dataset_processor._preprocess_data(train_data, verbose=self.verbose)
+                train_data_mod, _ = dataset_processor._preprocess_data(train_data, verbose=self.verbose)
 
-                # if self.verbose:
-                #     print(
-                #         f"After preprocessing: {len(train_data_mod)} samples and {len(train_data_mod.columns)} features"
-                #     )
-                #     print(
-                #         f"Removed {len(train_data) - len(train_data_mod)} samples during preprocessing"
-                #     )
+                if self.verbose:
+                    print(
+                        f"After preprocessing: {len(train_data_mod)} samples and {len(train_data_mod.columns)} features"
+                    )
+                    print(
+                        f"Removed {len(train_data) - len(train_data_mod)} samples during preprocessing"
+                    )
 
-                # train_data = train_data_mod
+                train_data = train_data_mod
 
                 if target_column is None:
                     raise ValueError(

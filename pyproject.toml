@@ -1,23 +1,56 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
 [project]
 name = "tabautosyn"
 version = "0.1.0"
-description = "A tabular data synthesis framework for automated machine learning"
+description = "AutoML framework for tabular data synthesis (Synthcity, genetic curation, LLM agents)."
 readme = "README.md"
-requires-python = ">=3.8"
+# synthcity 0.2.x requires torch<2.3; PyTorch does not ship those wheels for CPython 3.13+.
+requires-python = ">=3.10,<3.13"
+license = { text = "BSD-3-Clause" }
+keywords = ["tabular", "synthetic-data", "automl", "synthcity", "llm", "pydantic-ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
-    "pandas>=1.3.0",
-    "numpy>=1.21.0",
-    "matplotlib>=3.5.0",
-    "scikit-learn>=1.0.0",
-    "optuna>=3.0.0",
-    "joblib>=1.1.0",
-    "synthcity>=0.3.0",
-    "deap>=1.3.0",
+    "joblib>=1.3",
+    "langfuse>=3.0",
+    "loguru>=0.7",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "openai>=1.55",
+    "optuna>=3.5",
+    "pandas>=2.0",
+    "py-toon-format>=0.1.0",
+    "pydantic-ai>=1.0",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "seaborn>=0.13",
+    "synthcity>=0.2.11,<0.3",
+    "tqdm>=4.65",
+    "xgboost>=2.0",
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/Samp0rt/TabAutoSyn"
+Repository = "https://github.com/Samp0rt/TabAutoSyn"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tabautosyn"]
