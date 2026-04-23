@@ -137,7 +137,7 @@ import pandas as pd
 df = pd.read_csv("train.csv")
 
 syn = TabAutoSyn(model="task_specific", task="ml", verbose=True)
-# out = syn.run_generator("train.csv", n_samples=1000, target_column="target")
+out = syn.run_generator("train.csv", n_samples=1000, target_column="target")
 ```
 
 ### 🦙 Local LLM via Ollama (`gpt-oss:20b`)
