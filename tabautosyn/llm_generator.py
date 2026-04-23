@@ -23,6 +23,7 @@ def has_curly_brace(text: str) -> bool:
 
 _INVALID_VALUE_RE = re.compile(r'"\s*:\s*(,|\}|\])')
 
+
 def has_empty_value(json_str: str) -> bool:
     return bool(_INVALID_VALUE_RE.search(json_str))
 
@@ -122,6 +123,7 @@ class LLMGenerator:
         cols: list,
         gen_temperature: int = 0.5,
         verbose: bool = False,
+        target_column: str = None,
     ) -> None:
         """
         Initialize the LLM synthetic data generator.
@@ -136,6 +138,8 @@ class LLMGenerator:
                                               Defaults to 0.5.
             verbose (bool, optional): Whether to print detailed progress information
                 during data processing and synthesis. Defaults to False.
+            target_column (str, optional): Name of the target column for stratification.
+                                          If provided, ensures diverse target values in examples.
         """
         self.gen_client = gen_client
         self.gen_model_nm = gen_model_nm
@@ -145,9 +149,24 @@ class LLMGenerator:
 
         self.cols = cols
         self.gen_temperature = gen_temperature
+        self.target_column = target_column
 
         # Setup logger
         self.logger = logging.getLogger(__name__)
+
+        # Prepare stratified groups if target_column is provided
+        if self.target_column is not None:
+            if self.target_column not in self.real_data.columns:
+                raise ValueError(
+                    f"Target column '{self.target_column}' not found in real_data columns: {list(self.real_data.columns)}"
+                )
+            # Group data by target values
+            self.target_groups = {}
+            for target_value in self.real_data[self.target_column].unique():
+                self.target_groups[target_value] = self.real_data[
+                    self.real_data[self.target_column] == target_value
+                ].index.tolist()
+            self.unique_targets_count = len(self.target_groups)
 
     def instruction(self, sample: str, batch_size: int) -> tuple:
         """
@@ -199,13 +218,100 @@ class LLMGenerator:
 
         return str(res)
 
+    def _get_stratified_samples(
+        self, batch_size: int, target_usage_counter: dict
+    ) -> pd.DataFrame:
+        """
+        Select samples with stratification by target column.
+
+        Ensures that examples include diverse target values, prioritizing
+        less frequently used target values.
+
+        Args:
+            batch_size (int): Number of samples to select.
+            target_usage_counter (dict): Counter tracking how many times each target value has been used.
+
+        Returns:
+            pd.DataFrame: Selected rows with diverse target values.
+        """
+        if self.target_column is None or target_usage_counter is None:
+            raise ValueError("Stratified sampling requires target_column to be set")
+
+        selected_indices = []
+        num_examples_needed = min(batch_size, len(self.real_data))
+
+        # Calculate how many samples per target group (roughly equal distribution)
+        samples_per_target = max(1, num_examples_needed // self.unique_targets_count)
+        remaining_samples = num_examples_needed - (
+            samples_per_target * self.unique_targets_count
+        )
+
+        # Sort targets by usage (less used first) to ensure diversity
+        sorted_targets = sorted(
+            target_usage_counter.items(),
+            key=lambda x: (
+                x[1],
+                random.random(),
+            ),  # Sort by usage count, then randomize ties
+        )
+
+        # Select samples from each target group
+        for target_value, usage_count in sorted_targets:
+            if len(selected_indices) >= num_examples_needed:
+                break
+
+            available_indices = [
+                idx
+                for idx in self.target_groups[target_value]
+                if idx not in selected_indices
+            ]
+
+            if not available_indices:
+                continue
+
+            # Determine how many samples to take from this target group
+            if remaining_samples > 0:
+                take_count = samples_per_target + 1
+                remaining_samples -= 1
+            else:
+                take_count = samples_per_target
+
+            take_count = min(
+                take_count,
+                len(available_indices),
+                num_examples_needed - len(selected_indices),
+            )
+
+            # Randomly sample from this target group
+            sampled = random.sample(available_indices, take_count)
+            selected_indices.extend(sampled)
+            target_usage_counter[target_value] += take_count
+
+        # If we still need more samples, fill randomly from remaining data
+        if len(selected_indices) < num_examples_needed:
+            remaining_needed = num_examples_needed - len(selected_indices)
+            available_all = [
+                idx for idx in self.real_data.index if idx not in selected_indices
+            ]
+            if available_all:
+                additional = random.sample(
+                    available_all, min(remaining_needed, len(available_all))
+                )
+                selected_indices.extend(additional)
+
+        # Return selected rows
+        return self.real_data.loc[
+            selected_indices[:num_examples_needed], self.cols
+        ].copy()
+
     def run(self, n_samples: int, batch_size: int) -> None:
         """
         Generate synthetic data using LLM for a batch of real data samples.
 
         Processes real data in batches, sending sample groups to the LLM for
         synthetic data generation. Each batch uses consecutive rows from the real
-        data as examples, cycling through the dataset if needed.
+        data as examples, cycling through the dataset if needed. If target_column
+        is provided, uses stratified sampling to ensure diverse target values.
 
         Args:
             n_samples (int): Total number of synthetic samples to generate.
@@ -213,27 +319,57 @@ class LLMGenerator:
 
         Returns:
             list: A list of lists containing JSON objects with generated synthetic data.
+
+        Raises:
+            ValueError: If target_column is provided and number of unique targets
+                       exceeds n_samples.
         """
+        # Validate target stratification requirements
+        if self.target_column is not None:
+            if self.unique_targets_count > n_samples:
+                raise ValueError(
+                    f"Number of unique target values ({self.unique_targets_count}) "
+                    f"exceeds requested number of samples ({n_samples}). "
+                    f"Cannot ensure all target values are represented. "
+                    f"Please increase n_samples to at least {self.unique_targets_count}."
+                )
+
         res = []
         samples_generated = 0
+        # Track which target values have been used for stratification
+        target_usage_counter = None
+        if self.target_column is not None:
+            target_usage_counter = {target: 0 for target in self.target_groups.keys()}
 
         for j in tqdm(range(0, n_samples, batch_size)):
             # Calculate how many samples to generate in this batch
             remaining_samples = n_samples - samples_generated
             current_batch_size = min(batch_size, remaining_samples)
 
-            # Use real data samples as examples (cycling through if needed)
-            real_data_idx = j % len(self.real_data)
-            sampled_rows = self.real_data.loc[
-                real_data_idx : real_data_idx
-                + min(batch_size, len(self.real_data))
-                - 1,
-                self.cols,
-            ].copy()
+            # Select examples with stratification if target_column is provided
+            if self.target_column is not None:
+                sampled_rows = self._get_stratified_samples(
+                    current_batch_size, target_usage_counter
+                )
+            else:
+                # Use random sampling to see diverse parts of dataset
+                max_start_idx = max(
+                    0, len(self.real_data) - min(batch_size, len(self.real_data))
+                )
+                real_data_idx = (
+                    random.randint(0, max_start_idx) if max_start_idx > 0 else 0
+                )
+                sampled_rows = self.real_data.loc[
+                    real_data_idx : real_data_idx
+                    + min(batch_size, len(self.real_data))
+                    - 1,
+                    self.cols,
+                ].copy()
+
             sample = self.row2dict(sampled_rows)
             sys_info, user_info = self.instruction(sample, current_batch_size)
 
-            for i in range(5): # 5 iterations to recieve valid json (else skip)
+            for i in range(5):  # 5 iterations to recieve valid json (else skip)
                 try:
                     resp_temp = self.gen_client.chat.completions.create(
                         model=self.gen_model_nm,
@@ -263,14 +399,6 @@ class LLMGenerator:
                         self.logger.warning(
                             f"No valid JSON objects found in response for batch starting at {j}"
                         )
-            #     else: 
-            #         if self.verbose:
-            #             self.logger.warning(
-            #                 f"No valid JSON objects found in response for batch starting at {j}"
-            #             )
-            # else:
-            #     if self.verbose:
-            #         self.logger.error("Response is None")
 
         return res
 
@@ -296,19 +424,18 @@ class LLMGenerator:
                 stack.pop()
         return stack == []
 
-
     def _generate_additional_samples(self, additional_needed: int, batch_size: int):
         """
         Generate additional samples until the exact number of valid samples is reached
         or the maximum number of attempts is exhausted.
         """
         additional_records = []
-        max_attempts = 10 
+        max_attempts = 10
 
         if additional_needed <= 0:
             return additional_records
 
-        # Use a random sample from real data as example 
+        # Use a random sample from real data as example
         sample_idx = random.randint(0, len(self.real_data) - 1)
         sampled_rows = self.real_data.loc[
             sample_idx : sample_idx + min(batch_size, len(self.real_data)) - 1,
@@ -338,7 +465,9 @@ class LLMGenerator:
                 content = resp_temp.choices[0].message.content
                 if content is None:
                     if self.verbose:
-                        self.logger.warning("Additional generation response content is None")
+                        self.logger.warning(
+                            "Additional generation response content is None"
+                        )
                     continue
 
                 json_objects = extract_json_objects(content)
@@ -349,12 +478,14 @@ class LLMGenerator:
 
                 valid = []
                 for obj in json_objects:
-                    if self._is_valid_sample(obj): 
+                    if self._is_valid_sample(obj):
                         valid.append(obj)
 
                 if not valid:
                     if self.verbose:
-                        self.logger.warning("All generated samples were invalid (NaN/empty)")
+                        self.logger.warning(
+                            "All generated samples were invalid (NaN/empty)"
+                        )
                     continue
 
                 take = min(remaining, len(valid))
@@ -375,7 +506,6 @@ class LLMGenerator:
 
         return additional_records
 
-
     def _is_valid_sample(self, sample: dict) -> bool:
         """
         Check if generated sample is valid (no NaNs / missing required columns).
@@ -389,11 +519,12 @@ class LLMGenerator:
             if isinstance(val, float):
                 if pd.isna(val):
                     return False
-            if isinstance(val, str) and (val.strip() == "" or val.strip().lower() == "nan"):
+            if isinstance(val, str) and (
+                val.strip() == "" or val.strip().lower() == "nan"
+            ):
                 return False
 
         return True
-
 
     def generate(self, n_samples: int, batch_size: int) -> pd.DataFrame:
         """
@@ -413,47 +544,25 @@ class LLMGenerator:
         """
         syn_res = self.run(n_samples=n_samples, batch_size=batch_size)
 
-        # records = []
-        # for sublist in syn_res:
-        #     if sublist:
-        #         records.extend(sublist)
-
-        # # Ensure we have exactly n_samples
-        # if len(records) < n_samples:
-        #     if self.verbose:
-        #         self.logger.warning(
-        #             f"Generated only {len(records)} samples, requested {n_samples}. Generating additional samples..."
-        #         )
-        #     # Generate additional samples to reach n_samples
-        #     additional_needed = n_samples - len(records)
-        #     additional_records = self._generate_additional_samples(
-        #         additional_needed, batch_size
-        #     )
-        #     records.extend(additional_records)
-        # elif len(records) > n_samples:
-        #     if self.verbose:
-        #         self.logger.warning(
-        #             f"Generated {len(records)} samples, requested {n_samples}. Truncating to {n_samples}"
-        #         )
-        #     records = records[:n_samples]
-
-        # df_syn = pd.DataFrame(records, columns=list(self.real_data.columns))
-
-        # return df_syn
-
-
         records = []
         for sublist in syn_res:
             if sublist:
                 # Filter out records containing NaN values
                 valid_records = [
-                    record for record in sublist 
-                    if not any(pd.isna(val) for val in record.values() if isinstance(record, dict))
+                    record
+                    for record in sublist
+                    if not any(
+                        pd.isna(val)
+                        for val in record.values()
+                        if isinstance(record, dict)
+                    )
                 ]
                 records.extend(valid_records)
 
         # Track how many samples were filtered out
-        filtered_count = sum(len(sublist) for sublist in syn_res if sublist) - len(records)
+        filtered_count = sum(len(sublist) for sublist in syn_res if sublist) - len(
+            records
+        )
         if filtered_count > 0 and self.verbose:
             self.logger.warning(
                 f"Filtered out {filtered_count} samples containing NaN values"
@@ -487,12 +596,18 @@ class LLMGenerator:
                     f"Final DataFrame contains {df_syn.isnull().sum().sum()} NaN values. Removing affected rows..."
                 )
             df_syn = df_syn.dropna()
-            
+
             # If we lost too many rows, regenerate
             if len(df_syn) < n_samples:
                 shortage = n_samples - len(df_syn)
-                additional_records = self._generate_additional_samples(shortage, batch_size)
-                df_additional = pd.DataFrame(additional_records, columns=list(self.real_data.columns))
-                df_syn = pd.concat([df_syn, df_additional], ignore_index=True).iloc[:n_samples]
+                additional_records = self._generate_additional_samples(
+                    shortage, batch_size
+                )
+                df_additional = pd.DataFrame(
+                    additional_records, columns=list(self.real_data.columns)
+                )
+                df_syn = pd.concat([df_syn, df_additional], ignore_index=True).iloc[
+                    :n_samples
+                ]
 
         return df_syn

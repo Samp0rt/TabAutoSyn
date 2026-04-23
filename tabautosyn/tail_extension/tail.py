@@ -6,11 +6,17 @@ from sklearn.neighbors import KernelDensity
 from sklearn.metrics import pairwise_distances
 from scipy.stats import entropy, wasserstein_distance
 import matplotlib.pyplot as plt
+from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
+
 from .Matrix import (
     matrix_eigenvalue_mse,
     matrix_cosine_similarity,
     matrix_frobenius_distance,
 )
+
+_TAIL_CONSOLE = Console()
 
 
 # ==========================================================
@@ -256,6 +262,7 @@ def correct_tails_by_adding(
     improvement_threshold=1e-4,
     random_state=0,
     verbose=True,
+    tail_log_every: int | None = None,
     scaler=False,
 ):
     """
@@ -300,6 +307,10 @@ def correct_tails_by_adding(
         Random seed
     verbose : bool
         Whether to print progress
+    tail_log_every : int, optional
+        If ``verbose`` is True, log each tail improvement when set to ``1``,
+        every *k*-th improvement when set to *k* > 1, or only the bookend
+        summary when ``None`` (default).
     scaler : bool
         Whether to use RobustScaler for normalization
 
@@ -341,18 +352,13 @@ def correct_tails_by_adding(
     tail_candidates = Xt
 
     # === Clustering (optional) ===
+    tail_clustered = False
     if use_clustering and len(tail_candidates) > n_tail_clusters:
         reps_idx = cluster_tail_candidates(
             tail_candidates, n_tail_clusters, random_state
         )
         tail_candidates = tail_candidates[reps_idx]
-        if verbose:
-            print(
-                f"[+] Clustered tail: selected {len(tail_candidates)} representatives"
-            )
-    else:
-        if verbose:
-            print(f"[+] Using {len(tail_candidates)} tail candidates")
+        tail_clustered = True
 
     # === Feature weights ===
     sigmas = np.std(Xr, axis=0)
@@ -398,12 +404,46 @@ def correct_tails_by_adding(
 
     # === Initial state ===
     J, D_tail, D_center = compute_objective(Xs)
-    if verbose:
+
+    def _log_improvement(step_label: str) -> None:
         if loss_scope == "global":
-            print(f"[i] Initial global loss: J={J:.6f}")
+            _TAIL_CONSOLE.print(
+                f"    [dim]step {step_label}[/dim] → [bold]J={J:.6f}[/bold]"
+            )
         else:
-            print(
-                f"[i] Initial hybrid objective: J={J:.6f}, D_tail={D_tail:.6f}, D_center={D_center:.6f}"
+            _TAIL_CONSOLE.print(
+                f"    [dim]step {step_label}[/dim] → [bold]J={J:.6f}[/bold]  "
+                f"[dim](D_tail={D_tail:.6f}, D_center={D_center:.6f})[/dim]"
+            )
+
+    def _should_log_improvement(added: int) -> bool:
+        if tail_log_every is None:
+            return False
+        if tail_log_every <= 0:
+            return True
+        return added == 1 or added % tail_log_every == 0
+
+    if verbose:
+        _TAIL_CONSOLE.print()
+        _TAIL_CONSOLE.print(
+            Rule("[bold cyan]📈 Tail extension[/bold cyan]", style="cyan")
+        )
+        if tail_clustered:
+            _TAIL_CONSOLE.print(
+                f"  [dim]Clustered tail →[/dim] [green]{len(tail_candidates)}[/green] representatives"
+            )
+        else:
+            _TAIL_CONSOLE.print(
+                f"  [dim]Tail candidate pool[/dim] · [green]{len(tail_candidates)}[/green] rows"
+            )
+        if loss_scope == "global":
+            _TAIL_CONSOLE.print(
+                f"  [yellow]●[/yellow] Initial global loss  [bold]J={J:.6f}[/bold]"
+            )
+        else:
+            _TAIL_CONSOLE.print(
+                f"  [yellow]●[/yellow] Initial hybrid objective  [bold]J={J:.6f}[/bold]  "
+                f"[dim](D_tail={D_tail:.6f}, D_center={D_center:.6f})[/dim]"
             )
 
     history = [(0, J, D_tail, D_center)]
@@ -435,13 +475,8 @@ def correct_tails_by_adding(
                     history.append((added, J, D_tail, D_center))
                     improved = True
 
-                    if verbose:
-                        if loss_scope == "global":
-                            print(f"[{added}] Improvement: J={J:.6f}")
-                        else:
-                            print(
-                                f"[{added}] Improvement: J={J:.6f}, D_tail={D_tail:.6f}, D_center={D_center:.6f}"
-                            )
+                    if verbose and _should_log_improvement(added):
+                        _log_improvement(str(added))
                     break
 
         elif search_strategy == "greedy":
@@ -474,23 +509,31 @@ def correct_tails_by_adding(
                 history.append((added, J, D_tail, D_center))
                 improved = True
 
-                if verbose:
-                    if loss_scope == "global":
-                        print(f"[{added}] Improvement (greedy): J={J:.6f}")
-                    else:
-                        print(
-                            f"[{added}] Improvement (greedy): J={J:.6f}, D_tail={D_tail:.6f}, D_center={D_center:.6f}"
-                        )
+                if verbose and _should_log_improvement(added):
+                    _log_improvement(f"{added} (greedy)")
 
     # === Output ===
     if verbose:
         if loss_scope == "global":
-            print(f"\n[✓] Final global loss: J={J:.6f}")
-        else:
-            print(
-                f"\n[✓] Final values: J={J:.6f}, D_tail={D_tail:.6f}, D_center={D_center:.6f}"
+            summary_lines = (
+                f"[bold green]Final[/bold green] global loss  [bold]J={J:.6f}[/bold]\n"
+                f"[dim]Added[/dim] [cyan]{added}[/cyan] [dim]tail row(s), α={hybrid_alpha}[/dim]"
             )
-        print(f"[✓] Added {added} tail samples (α={hybrid_alpha})")
+        else:
+            summary_lines = (
+                f"[bold green]Final[/bold green]  [bold]J={J:.6f}[/bold]  "
+                f"[dim]D_tail={D_tail:.6f}, D_center={D_center:.6f}[/dim]\n"
+                f"[dim]Added[/dim] [cyan]{added}[/cyan] [dim]tail row(s), α={hybrid_alpha}[/dim]"
+            )
+        _TAIL_CONSOLE.print()
+        _TAIL_CONSOLE.print(
+            Panel.fit(
+                summary_lines,
+                title="[bold green]✓ Tail extension[/bold green]",
+                border_style="green",
+            )
+        )
+        _TAIL_CONSOLE.print()
 
     # Inverse transform if scaler was used
     if scaler:

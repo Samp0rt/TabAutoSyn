@@ -5,8 +5,8 @@ import warnings
 from typing import Optional
 from .individ import Individual
 from abc import ABC, abstractmethod
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.metrics import roc_auc_score, r2_score
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import LabelEncoder
 
@@ -77,17 +77,22 @@ class MLFitnessEvaluator(FitnessEvaluator):
         except Exception:
             return -1e6
 
-        clf = xgb.XGBClassifier(
-            n_estimators=20,
-            max_depth=3,
-            learning_rate=0.2,
-            use_label_encoder=False,
-            eval_metric="logloss",
-            verbosity=0,
-        )
+        # XGBClassifier
+        try:
+            clf = xgb.XGBClassifier(
+                n_estimators=20,
+                max_depth=3,
+                learning_rate=0.2,
+                use_label_encoder=False,
+                eval_metric="logloss",
+                verbosity=0,
+            )
 
-        clf.fit(X_train, y_train)
-        proba_clf = clf.predict_proba(X_test)
+            clf.fit(X_train, y_train)
+            proba_clf = clf.predict_proba(X_test)
+        except (ValueError, Exception) as e:
+            # Handle class mismatch or other XGBoost errors
+            return -1e6
 
         auc_lr = self._sum_roc_auc(y_test, proba_lr)
         auc_clf = self._sum_roc_auc(y_test, proba_clf)
@@ -96,6 +101,28 @@ class MLFitnessEvaluator(FitnessEvaluator):
             return -1e6
 
         return float(auc_lr + auc_clf)
+
+    def _fit_and_score_r2(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+    ) -> float:
+
+        lr = LinearRegression()
+        lr.fit(X_train, y_train)
+
+        y_pred = lr.predict(X_test)
+        r2_lr = r2_score(y_test, y_pred)
+
+        lr = xgb.XGBRegressor(random_state=42)
+        lr.fit(X_train, y_train)
+
+        y_pred = lr.predict(X_test)
+        r2_xgb = r2_score(y_test, y_pred)
+
+        return float(r2_lr + r2_xgb)
 
     def evaluate(self, individual: Individual, test_data: pd.DataFrame) -> float:
         """Evaluate individual fitness"""
