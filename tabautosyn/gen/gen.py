@@ -1,7 +1,6 @@
 import random
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
@@ -9,7 +8,7 @@ from dataclasses import dataclass
 # from deap import base, creator, tools
 from .individ import Individual
 from .fitness import FitnessEvaluator, MLFitnessEvaluator
-from .crossover import CrossoverOperator, ExchangeCrossover,UniqueExchangeCrossover
+from .crossover import CrossoverOperator, UniqueExchangeCrossover
 from .mutation import MutationOperator, ReplacementMutation
 from .selection import SelectionOperator, TournamentSelection
 
@@ -164,11 +163,15 @@ class GeneticAlgorithm:
             valid_population = False
 
             for attempt in range(1, max_attempts + 1):
-                initial_population = random_subsampling(
+                initial_population_dict = random_subsampling(
                     syn_data,
                     n_samples=self.config.n_bootstrap_samples,
                     sample_ratio=self.config.bootstrap_sample_ratio,
                 )
+                # Flatten the dictionary into a list of DataFrames
+                initial_population = []
+                for ratio_samples in initial_population_dict.values():
+                    initial_population.extend(ratio_samples)
 
                 # Ensure every bootstrap sample includes all target classes
                 if all(
@@ -216,7 +219,9 @@ class GeneticAlgorithm:
         # Evolution
         if self.config.verbose:
             console = Console()
-            with console.status("[bold green]Working on tasks...") as status:
+            with console.status(
+                "[bold cyan]🧬 Evolving generations…[/bold cyan]"
+            ) as status:
                 for gen in range(1, self.config.n_generations + 1):
                     population = self._evolve_generation(population)
                     self._evaluate_population(population, real_data)
@@ -274,15 +279,17 @@ def bootstrap_sample(
         bootstrap_samples.append(sample)
     return bootstrap_samples
 
-def random_subsampling(data: pd.DataFrame, n_samples: int = 10, 
-                     sample_ratios: list = None):
-    
-    if sample_ratios is None:
-        sample_ratios = [0.5, 0.6, 0.7, 0.8, 0.9]
-    
+
+def random_subsampling(
+    data: pd.DataFrame, n_samples: int = 10, sample_ratio: list = None
+):
+
+    if sample_ratio is None:
+        sample_ratio = [0.5, 0.6, 0.7, 0.8, 0.9]
+
     bootstrap_samples = {}
-    
-    for ratio in sample_ratios:
+
+    for ratio in sample_ratio:
         n = int(len(data) * ratio)
         samples = []
         for _ in range(n_samples):
@@ -290,7 +297,7 @@ def random_subsampling(data: pd.DataFrame, n_samples: int = 10,
             sample = data.iloc[indices].reset_index(drop=True)
             samples.append(sample)
         bootstrap_samples[ratio] = samples
-   
+
     return bootstrap_samples
 
 
@@ -322,4 +329,3 @@ def filter_rare_classes(df_train, df_test, target_col):
     df_test_filtered = df_test[df_test[target_col].isin(valid_classes)].copy()
 
     return df_train_filtered, df_test_filtered
-

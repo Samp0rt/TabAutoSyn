@@ -1,0 +1,6 @@
+us_location_description = "us_location: US geographic dataset with state codes, latitude/longitude coordinates, state birds, and latitude-based climate zones."
+online_shoppers_intention_description = "online_shoppers: Online shopping session dataset with page visit counts, durations, bounce/exit rates, visitor info, and revenue outcome."
+page_blocks_description = "page_blocks: Document page layout dataset with block geometry, pixel statistics, and block type classification."
+adult_description = "adult: US Census dataset with demographics, employment, education, and income attributes."
+iris_description = "iris: Iris dataset with sepal length, sepal width, petal length, petal width, and target."
+seattle_housing_description = "seattle_housing: Seattle housing dataset with number of bedrooms, bathrooms, size, size units, lot size, lot size units, zip code, and price."
