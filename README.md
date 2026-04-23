@@ -1,3 +1,5 @@
+! [logo](assets/image.png)
+
 # 📊 TabAutoSyn
 
 **TabAutoSyn** is an **AutoML** framework for **tabular data synthesis**: it automates model choice, training, hyperparameter search, and quality-driven refinement end to end. It combines [Synthcity](https://github.com/vanderschaarlab/synthcity) generators, **genetic curation** of synthetic rows, **tail extension** of distributions, and (in the main pipeline) **LLM agents** on [OpenRouter](https://openrouter.ai/) to discover and repair logical/structural dependencies between columns. The stack is aimed at workflows where you need both statistical fidelity to real data and domain-consistent constraints.
