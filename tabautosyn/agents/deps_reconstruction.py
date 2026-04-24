@@ -796,17 +796,30 @@ class DependencyFixer:
                     encoded_unq = anchor_mapping.get(
                         str(unq), anchor_mapping.get(unq, unq)
                     )
+                    total_batches = max(
+                        1, (len(single_anchor_df) + batch_size - 1) // batch_size
+                    )
                     if self.verbose and range_status is not None:
                         range_status.update(
                             f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
                             f"[yellow]{anchor_col}[/yellow] · "
                             f"value [white]{unq!s}[/white] "
-                            f"([dim]{anchor_idx}/{n_anchor_vals}[/dim]) · batches…"
+                            f"([dim]{anchor_idx}/{n_anchor_vals}[/dim]) · "
+                            f"batch [dim]0/{total_batches}[/dim]"
                         )
                     per_anchor_batches = 0
                     per_anchor_skips = 0
                     per_anchor_cells = 0
                     for i in range(0, len(single_anchor_df), batch_size):
+                        current_batch = (i // batch_size) + 1
+                        if self.verbose and range_status is not None:
+                            range_status.update(
+                                f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
+                                f"[yellow]{anchor_col}[/yellow] · "
+                                f"value [white]{unq!s}[/white] "
+                                f"([dim]{anchor_idx}/{n_anchor_vals}[/dim]) · "
+                                f"batch [dim]{current_batch}/{total_batches}[/dim]"
+                            )
                         batch_full = single_anchor_df.iloc[i : i + batch_size].copy()
                         batch_dep = batch_full[dep_cols].copy()
                         n_rows = len(batch_dep)

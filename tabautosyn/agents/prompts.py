@@ -244,11 +244,21 @@ STRICT OUTPUT FORMAT:
 - Output must be exactly one sentence in this format:
   <dataset_name>: <dataset description sentence>.
 - `dataset_name` must be short, lowercase, snake_case.
-- The description must be concise and specific to the provided chunk.
+- The description must be concise but dependency-oriented and specific to the provided chunk.
 - Do not output extra lines, explanations, or surrounding quotes.
 
+CONTENT REQUIREMENTS FOR THE DESCRIPTION SENTENCE:
+- Mention the domain/entity of the dataset.
+- Explicitly state what the target-like column represents (if any obvious label/class column exists).
+- Mention 2-4 important columns (or column groups) and their likely role.
+- Include likely logical constraints useful for dependency discovery (for example:
+  code->name mappings, category->numeric range constraints, uniqueness keys, simple if-then logic).
+- Prefer concrete wording from observed columns/rows; avoid generic phrases like
+  "tabular data with several features".
+- Keep it to one sentence using semicolons to separate parts.
+
 Example format:
-us_location: US geographic dataset with state codes, latitude/longitude coordinates, state birds, and latitude-based climate zones.
+us_location: US geography-by-state dataset; target bird is the official state bird label; state_code maps to state identity while lat/lon encode location; lat_zone constrains plausible latitude ranges and co-varies with climate-like attributes; state_code with state name behaves as near-unique mapping.
 """
 )
 

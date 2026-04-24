@@ -15,7 +15,7 @@ _instrumentation_initialized = False
 load_dotenv()
 
 
-def get_langfuse_judge_client() -> Langfuse:
+def get_langfuse_judge_client() -> Langfuse | None:
     """Get or create the Langfuse client for uploading maseval judge traces.
 
     This client uses LANGFUSE_PUBLIC_KEY_JUDGE and LANGFUSE_SECRET_KEY_JUDGE
@@ -27,7 +27,8 @@ def get_langfuse_judge_client() -> Langfuse:
     when evaluations run.
 
     Returns:
-        Langfuse: The initialized Langfuse client for judge traces
+        Langfuse | None: The initialized Langfuse client for judge traces,
+        or ``None`` when Langfuse env vars are not configured.
     """
     global _langfuse_judge_client, _instrumentation_initialized
 
@@ -35,6 +36,11 @@ def get_langfuse_judge_client() -> Langfuse:
         public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
         secret_key = os.getenv("LANGFUSE_SECRET_KEY")
         host = os.getenv("LANGFUSE_BASE_URL")
+
+        # Langfuse tracing is optional. If credentials are not configured,
+        # skip initialization quietly so local runs do not fail/noise.
+        if not public_key or not secret_key or not host:
+            return None
 
         # Initialize with judge keys for uploading traces
         # This sets the global OpenTelemetry tracer provider

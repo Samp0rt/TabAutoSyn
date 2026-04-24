@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.metrics import mutual_info_score
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
-from toon_format import encode, decode
+from toon_format import encode
 from pandas.api.types import (
     is_bool_dtype,
     is_categorical_dtype,
