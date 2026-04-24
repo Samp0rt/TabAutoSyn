@@ -41,6 +41,19 @@ def _langfuse_host_reachable(host: str, timeout_sec: float = 0.5) -> bool:
         return False
 
 
+def langfuse_tracing_enabled() -> bool:
+    """Return True only when Langfuse tracing should be enabled."""
+    if os.getenv("LANGFUSE_ENABLED") and not _is_truthy(os.getenv("LANGFUSE_ENABLED")):
+        return False
+    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+    host = os.getenv("LANGFUSE_BASE_URL")
+    if not public_key or not secret_key or not host:
+        return False
+    probe_timeout = float(os.getenv("LANGFUSE_PROBE_TIMEOUT_SEC", "0.5"))
+    return _langfuse_host_reachable(host, timeout_sec=probe_timeout)
+
+
 def get_langfuse_judge_client() -> Langfuse | None:
     """Get or create the Langfuse client for uploading maseval judge traces.
 
@@ -69,15 +82,7 @@ def get_langfuse_judge_client() -> Langfuse | None:
         public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
         secret_key = os.getenv("LANGFUSE_SECRET_KEY")
         host = os.getenv("LANGFUSE_BASE_URL")
-
-        # Langfuse tracing is optional. If credentials are not configured,
-        # skip initialization quietly so local runs do not fail/noise.
-        if not public_key or not secret_key or not host:
-            return None
-        # If endpoint is unreachable, disable Langfuse for this process to avoid
-        # repeated OTEL export timeouts and noisy stack traces.
-        probe_timeout = float(os.getenv("LANGFUSE_PROBE_TIMEOUT_SEC", "0.5"))
-        if not _langfuse_host_reachable(host, timeout_sec=probe_timeout):
+        if not langfuse_tracing_enabled():
             _langfuse_disabled_for_process = True
             return None
 

@@ -61,6 +61,7 @@ from dotenv import load_dotenv
 
 from tabautosyn.utils.langfuse import (
     get_langfuse_judge_client,
+    langfuse_tracing_enabled,
     langfuse_output_payload,
     langfuse_safe_end as _safe_langfuse_end,
     langfuse_safe_span as _safe_langfuse_span,
@@ -1196,7 +1197,7 @@ class TabAutoSyn:
                                 real_data_chunk=str_real_data_chunk,
                             )
                         ),
-                        instrument=True,
+                        instrument=langfuse_tracing_enabled(),
                     )
                     user_df_info_result = await user_df_info_generator.run(
                         "Generate dataset description."
