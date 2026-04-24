@@ -3,7 +3,9 @@
 import json
 import os
 import secrets
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 from langfuse import Langfuse
 from dotenv import load_dotenv
@@ -12,7 +14,31 @@ from dotenv import load_dotenv
 # This sets the global OpenTelemetry tracer provider for pydantic AI instrumentation
 _langfuse_judge_client = None
 _instrumentation_initialized = False
+_langfuse_disabled_for_process = False
 load_dotenv()
+
+
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _langfuse_host_reachable(host: str, timeout_sec: float = 0.5) -> bool:
+    """Best-effort TCP reachability check for LANGFUSE_BASE_URL."""
+    try:
+        parsed = urlparse(host)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        if parsed.port is not None:
+            port = parsed.port
+        elif parsed.scheme == "https":
+            port = 443
+        else:
+            port = 80
+        with socket.create_connection((hostname, port), timeout=timeout_sec):
+            return True
+    except Exception:
+        return False
 
 
 def get_langfuse_judge_client() -> Langfuse | None:
@@ -30,7 +56,14 @@ def get_langfuse_judge_client() -> Langfuse | None:
         Langfuse | None: The initialized Langfuse client for judge traces,
         or ``None`` when Langfuse env vars are not configured.
     """
-    global _langfuse_judge_client, _instrumentation_initialized
+    global _langfuse_judge_client, _instrumentation_initialized, _langfuse_disabled_for_process
+
+    # Explicit global switch for local/offline runs.
+    if os.getenv("LANGFUSE_ENABLED") and not _is_truthy(os.getenv("LANGFUSE_ENABLED")):
+        return None
+
+    if _langfuse_disabled_for_process:
+        return None
 
     if _langfuse_judge_client is None:
         public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
@@ -40,6 +73,12 @@ def get_langfuse_judge_client() -> Langfuse | None:
         # Langfuse tracing is optional. If credentials are not configured,
         # skip initialization quietly so local runs do not fail/noise.
         if not public_key or not secret_key or not host:
+            return None
+        # If endpoint is unreachable, disable Langfuse for this process to avoid
+        # repeated OTEL export timeouts and noisy stack traces.
+        probe_timeout = float(os.getenv("LANGFUSE_PROBE_TIMEOUT_SEC", "0.5"))
+        if not _langfuse_host_reachable(host, timeout_sec=probe_timeout):
+            _langfuse_disabled_for_process = True
             return None
 
         # Initialize with judge keys for uploading traces
