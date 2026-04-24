@@ -2,6 +2,12 @@
 
 # 📊 TabAutoSyn
 
+[![Python](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-BSD%203--Clause-green.svg)](LICENSE)
+[![Repo size](https://img.shields.io/github/repo-size/Samp0rt/TabAutoSyn)](https://github.com/Samp0rt/TabAutoSyn)
+[![Last commit](https://img.shields.io/github/last-commit/Samp0rt/TabAutoSyn)](https://github.com/Samp0rt/TabAutoSyn/commits/main)
+[![Status](https://img.shields.io/badge/status-research-orange.svg)](#)
+
 **TabAutoSyn** is an **AutoML** framework for **tabular data synthesis**: it automates model choice, training, hyperparameter search, and quality-driven refinement end to end. It combines [Synthcity](https://github.com/vanderschaarlab/synthcity) generators, **genetic curation** of synthetic rows, **tail extension** of distributions, and (in the main pipeline) **LLM agents** on [OpenRouter](https://openrouter.ai/) to discover and repair logical/structural dependencies between columns. The stack is aimed at workflows where you need both statistical fidelity to real data and domain-consistent constraints.
 
 ## ✨ Features
@@ -77,9 +83,7 @@ If Ollama runs on another host or port, **`base_url` is currently hard-coded** i
 
 Dependencies and supported Python versions are declared in **`pyproject.toml`** (`[project.dependencies]` and `[project.optional-dependencies]`). `pip install -e .` installs the package using those declarations.
 
-**Supported Python:** `3.10`–`3.12` (see `requires-python` in `pyproject.toml`; `synthcity` 0.2.x expects a PyTorch stack that is not compatible with CPython 3.13+ yet).
-
-### 💻 Editable install (usual dev setup)
+### 💻 Editable install
 
 From the repository root:
 
@@ -196,10 +200,6 @@ TabAutoSyn/
 ## 📊 Metrics
 
 Metric names are grouped in `tabautosyn/config.py`: sanity checks, statistics, downstream model quality, synthetic detection, and privacy-oriented scores.
-
-## 📄 License
-
-BSD 3-Clause — see [LICENSE](LICENSE).
 
 ## 🙏 Acknowledgments
 
