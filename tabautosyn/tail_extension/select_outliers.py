@@ -139,10 +139,6 @@ class SyntheticQualityEvaluator:
         mask = distances > threshold
 
         label = "robust" if robust else "standard"
-        print(f"Mahalanobis distance method ({label}):")
-        print(f"  Poorly reproduced samples found : {mask.sum()}")
-        print(f"  Threshold (percentile {percentile})  : {threshold:.4f}")
-        print(f"  Threshold (chi2 sqrt)            : {np.sqrt(chi2_threshold):.4f}")
 
         return (
             pd.DataFrame({
@@ -191,10 +187,6 @@ class SyntheticQualityEvaluator:
         threshold = np.percentile(mean_distances, percentile)
         mask = mean_distances > threshold
 
-        print(f"\nK-Nearest Neighbours method (k={n_neighbors}):")
-        print(f"  Poorly reproduced samples found : {mask.sum()}")
-        print(f"  Threshold (percentile {percentile})  : {threshold:.4f}")
-
         return (
             pd.DataFrame({
                 "original_index": self.df_real.index[mask],
@@ -237,10 +229,6 @@ class SyntheticQualityEvaluator:
 
         threshold = np.percentile(log_likelihood, percentile)
         mask = log_likelihood < threshold
-
-        print(f"\nDensity-based method:")
-        print(f"  Poorly reproduced samples found : {mask.sum()}")
-        print(f"  Threshold (percentile {percentile})  : {threshold:.4f}")
 
         return (
             pd.DataFrame({
@@ -314,10 +302,6 @@ class SyntheticQualityEvaluator:
         threshold = np.percentile(combined, percentile)
         mask = combined > threshold
 
-        print(f"\nCombined method (weights: {weights}):")
-        print(f"  Poorly reproduced samples found : {mask.sum()}")
-        print(f"  Threshold (percentile {percentile})  : {threshold:.4f}")
-
         return (
             pd.DataFrame({
                 "original_index": self.df_real.index[mask],
@@ -341,7 +325,6 @@ def select_poorly_reproduced_samples(
     df_syn: pd.DataFrame,
     weights: dict[str, float] | None = None,
     percentile: float = 90,
-    n_preview: int = 10,
 ) -> pd.DataFrame:
     """Return real samples that are poorly reproduced by the synthetic dataset.
 
@@ -358,8 +341,6 @@ def select_poorly_reproduced_samples(
     percentile:
         Samples above this combined-score percentile are considered poorly
         reproduced.
-    n_preview:
-        Number of sample rows to print for a quick sanity check.
 
     Returns
     -------
@@ -374,9 +355,5 @@ def select_poorly_reproduced_samples(
 
     poor_indices = poor_combined["original_index"].values
     df_poor = df_real.loc[poor_indices]
-
-    print(f"\nTotal poorly reproduced samples: {len(df_poor)}")
-    print(f"\nSample preview (first {n_preview} rows):")
-    print(df_poor.head(n_preview))
 
     return df_poor
