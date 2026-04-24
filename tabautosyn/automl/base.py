@@ -1210,7 +1210,7 @@ class TabAutoSyn:
                     RICH_CONSOLE.print()
                     RICH_CONSOLE.print(
                         Rule(
-                            "[bold magenta]🔗 Dependency discovery[/bold magenta] [dim]· shared for all plugins ·[/dim]",
+                            "[bold magenta]🔗 DependencyDiscovery[/bold magenta] [dim]· shared for all plugins ·[/dim]",
                             style="magenta",
                         )
                     )
@@ -1304,7 +1304,7 @@ class TabAutoSyn:
                     _safe_langfuse_end(dep_discovery_span)
                 if self.verbose:
                     RICH_CONSOLE.print(
-                        "[magenta]Dependency discovery summary[/magenta] "
+                        "[magenta]DependencyDiscovery summary[/magenta] "
                         f"[dim]· shared ·[/dim] {dep_summary}"
                     )
 
@@ -1409,7 +1409,7 @@ class TabAutoSyn:
                         RICH_CONSOLE.print()
                         RICH_CONSOLE.print(
                             Rule(
-                                "[bold yellow] 🛠 Dependency fixer[/bold yellow] "
+                                "[bold yellow] 🛠 DependencyFixer[/bold yellow] "
                                 f"[dim]· plugin {plugin_name} ·[/dim]",
                                 style="yellow",
                             )
@@ -1448,7 +1448,7 @@ class TabAutoSyn:
                     )
                     if self.verbose:
                         RICH_CONSOLE.print(
-                            f"[cyan]Dependency fixer — row counts ({plugin_name})[/cyan]\n"
+                            f"[cyan]DependencyFixer — row counts ({plugin_name})[/cyan]\n"
                             f"  [bold]Main synthetic (full_df):[/bold] [green]{len(fixed_syn_df)}[/green] rows\n"
                             f"  [bold]Tail outliers:[/bold]           [green]{len(fixed_syn_outliers)}[/green] rows"
                         )
@@ -1703,8 +1703,8 @@ def _markdown_generate_pipeline_summary(
     stage_labels = [
         ("generated_rows", "Generated (main)"),
         ("generated_outlier_rows", "Generated (outliers)"),
-        ("fixed_rows", "After dependency fixer (main)"),
-        ("fixed_outlier_rows", "After dependency fixer (outliers)"),
+        ("fixed_rows", "After DependencyFixer (main)"),
+        ("fixed_outlier_rows", "After DependencyFixer (outliers)"),
         ("post_tail_rows", "After tail correction"),
         ("post_filter_real_rows", "After class filter — real"),
         ("post_filter_syn_rows", "After class filter — synthetic"),
