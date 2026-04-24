@@ -138,8 +138,8 @@ import pandas as pd
 
 df = pd.read_csv("train.csv")
 
-syn = TabAutoSyn(model="task_specific", task="ml", verbose=True)
-out = syn.run_generator("train.csv", n_samples=1000, target_column="target")
+tabsyn = TabAutoSyn(model="task_specific", task="ml", verbose=True)
+out = tabsyn.run_generator("train.csv", n_samples=1000, target_column="target")
 ```
 
 ### 🦙 Local LLM via Ollama (`gpt-oss:20b`)
@@ -149,8 +149,8 @@ Ensure Ollama is running and `ollama pull gpt-oss:20b` has completed (see [Ollam
 ```python
 from tabautosyn import TabAutoSyn
 
-syn = TabAutoSyn(model="LLM", verbose=True)
-df_syn = syn.run_generator(
+tabsyn = TabAutoSyn(model="LLM", verbose=True)
+df_syn = tabsyn.run_generator(
     train_data_path="train.csv",
     n_samples=500,
     batch_size=10,
@@ -160,19 +160,34 @@ df_syn = syn.run_generator(
 
 ## 📁 Project layout (summary)
 
-```
+```text
 TabAutoSyn/
+├── assets/                   # logo/demo assets for README
 ├── tabautosyn/
 │   ├── automl/base.py      # TabAutoSyn, generate, LLM / task_specific paths
 │   ├── gen/                # genetic algorithm
 │   ├── tail_extension/     # distribution tails
 │   ├── agents/             # LLM agents
+│   ├── strategy/           # example-selection strategies + scoring and privacy/attribution analysis
+│   ├── utils/              # dataset processing and utility helpers
 │   ├── llm_generator.py    # row generation via chat model
 │   ├── optimization.py     # Optuna
 │   └── metrics.py
-├── curation/gen/             # standalone GA curation module
+├── curation/
+│   ├── gen/                  # standalone GA curation module
+│   └── examples/             # curation examples (with sample data)
+├── datasets/                 # committed datasets
+├── datasets_test/
+│   ├── train/                # train split for tests/examples
+│   └── test/                 # test split for tests/examples
 ├── examples/
 │   └── run_generate.py       # CLI example for TabAutoSyn.generate()
+├── optuna_params/            # baseline Optuna best params by plugin
+│   ├── ctgan/
+│   ├── ddpm/
+│   └── dpgan/
+├── optuna_params(2_metrics)/ # Optuna params for 2-metric experiments
+│   └── ...                   # metric/model/dataset/plugin hierarchy
 ├── .env.example              # environment variable template
 ├── pyproject.toml            # dependencies & build (single source of truth)
 └── LICENSE
