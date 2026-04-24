@@ -86,6 +86,7 @@ class MLFitnessEvaluator(FitnessEvaluator):
                 use_label_encoder=False,
                 eval_metric="logloss",
                 verbosity=0,
+                n_jobs=2,
             )
 
             clf.fit(X_train, y_train)

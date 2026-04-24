@@ -17,6 +17,7 @@ from tabautosyn.optimization import HyperparameterOptimizer
 from tabautosyn.llm_generator import LLMGenerator
 from tabautosyn.gen.gen import GAConfig, GeneticAlgorithm
 from tabautosyn.tail_extension.tail import correct_tails_by_adding
+from tabautosyn.tail_extension.select_outliers import select_poorly_reproduced_samples
 from tabautosyn.utils.dataset_processor import DatasetProcessor
 from tabautosyn.agents.prompts import (
     DEPENDENCY_DISCOVERY_PROMPT,
@@ -1158,16 +1159,7 @@ class TabAutoSyn:
                         raise ValueError(
                             f"target_column {target_column} not found in train_data columns. Please provide a valid target_column."
                         )
-
-                outliers = self._extract_outliers(
-                    df=train_data, columns=train_data.columns
-                )
-                if self.verbose:
-                    print(
-                        f"[cyan]Outlier extraction complete:[/cyan] {len(outliers)} rows "
-                        f"from {len(train_data)} preprocessed rows."
-                    )
-
+                
                 final_syn_df = pd.DataFrame()
 
                 real_data_info_dict = dataset_processor._extract_dataset_info(
@@ -1316,6 +1308,7 @@ class TabAutoSyn:
                         f"[dim]· shared ·[/dim] {dep_summary}"
                     )
 
+                tail_pool_size = 0
                 for plugin_idx, plugin_name in enumerate(plugins, start=1):
                     plugin_span = _safe_langfuse_span(
                         pipeline_trace,
@@ -1351,6 +1344,27 @@ class TabAutoSyn:
                         plugin_span,
                         metadata={"generated_rows": len(syn_df)},
                     )
+
+                    outliers = select_poorly_reproduced_samples(
+                        df_real=train_data,
+                        df_syn=syn_df[train_data.columns],
+                    ).dropna()
+                    if outliers.empty:
+                        # Fallback for fully flat score distributions.
+                        outliers = self._extract_outliers(
+                            df=train_data, columns=train_data.columns
+                        ).dropna()
+                    if outliers.empty:
+                        outliers = train_data.sample(
+                            n=min(1, len(train_data)), random_state=42
+                        ).copy()
+                    if self.verbose:
+                        print(
+                            f"[cyan]Outlier extraction complete ({plugin_name}):[/cyan] {len(outliers)} rows "
+                            f"from {len(train_data)} preprocessed rows."
+                        )
+                    if tail_pool_size == 0:
+                        tail_pool_size = len(outliers)
 
                     syn_outliers = self._generate_synthetics_non_llm(
                         train_data=outliers,
@@ -1572,7 +1586,7 @@ class TabAutoSyn:
                         n_input_rows=len(train_data),
                         n_input_columns=len(train_data.columns),
                         target_column=target_column,
-                        n_outliers=len(outliers),
+                        n_outliers=tail_pool_size,
                         plugins=plugins,
                         final_rows=len(final_syn_df),
                         dataset_path=dataset_path,

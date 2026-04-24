@@ -22,7 +22,7 @@ from sklearn.cluster import KMeans
 from sklearn.utils.extmath import randomized_svd
 from typing import Dict, List, Optional
 
-from strategies.scoring import ExampleScores, pareto_score
+from strategy.scoring import ExampleScores, pareto_score
 
 
 # ---------------------------------------------------------------------------
