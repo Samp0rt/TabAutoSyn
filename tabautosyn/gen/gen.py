@@ -167,6 +167,7 @@ class GeneticAlgorithm:
                     syn_data,
                     n_samples=self.config.n_bootstrap_samples,
                     sample_ratio=self.config.bootstrap_sample_ratio,
+                    target_col=self.target_col,
                 )
                 # Flatten the dictionary into a list of DataFrames
                 initial_population = []
@@ -281,7 +282,10 @@ def bootstrap_sample(
 
 
 def random_subsampling(
-    data: pd.DataFrame, n_samples: int = 10, sample_ratio: list = None
+    data: pd.DataFrame,
+    n_samples: int = 10,
+    sample_ratio: list = None,
+    target_col: str | None = None,
 ):
 
     if sample_ratio is None:
@@ -293,12 +297,68 @@ def random_subsampling(
         n = int(len(data) * ratio)
         samples = []
         for _ in range(n_samples):
-            indices = np.random.choice(len(data), size=n, replace=False)
-            sample = data.iloc[indices].reset_index(drop=True)
+            if target_col is not None and target_col in data.columns:
+                sample = _stratified_subsample(
+                    data=data,
+                    n=n,
+                    target_col=target_col,
+                )
+            else:
+                indices = np.random.choice(len(data), size=n, replace=False)
+                sample = data.iloc[indices].reset_index(drop=True)
             samples.append(sample)
         bootstrap_samples[ratio] = samples
 
     return bootstrap_samples
+
+
+def _stratified_subsample(data: pd.DataFrame, n: int, target_col: str) -> pd.DataFrame:
+    """Stratified subsample with guaranteed class coverage.
+
+    Ensures each class in ``target_col`` is represented at least once in the
+    sample, then fills remaining rows approximately proportionally.
+    """
+    if target_col not in data.columns:
+        raise ValueError(f"target column '{target_col}' not found in data")
+
+    class_values = data[target_col].dropna().unique().tolist()
+    if not class_values:
+        raise ValueError(f"target column '{target_col}' has no valid classes")
+
+    n_classes = len(class_values)
+    # Guarantee at least one slot per class.
+    n = max(n, n_classes)
+    n = min(n, len(data))
+
+    # One mandatory row per class.
+    selected_parts: list[pd.DataFrame] = []
+    remaining = n
+    for cls in class_values:
+        class_df = data[data[target_col] == cls]
+        selected_parts.append(class_df.sample(n=1, replace=False))
+        remaining -= 1
+
+    if remaining > 0:
+        class_counts = data[target_col].value_counts()
+        weights = np.array(
+            [class_counts.get(cls, 0) for cls in class_values], dtype=float
+        )
+        if weights.sum() <= 0:
+            weights = np.ones_like(weights)
+        probs = weights / weights.sum()
+        extra_per_class = np.random.multinomial(remaining, probs)
+
+        for cls, k_extra in zip(class_values, extra_per_class):
+            if k_extra <= 0:
+                continue
+            class_df = data[data[target_col] == cls]
+            # If class is too small, allow replacement to preserve class coverage.
+            replace = k_extra > len(class_df)
+            selected_parts.append(class_df.sample(n=k_extra, replace=replace))
+
+    sample = pd.concat(selected_parts, axis=0, ignore_index=True)
+    sample = sample.sample(frac=1).reset_index(drop=True)
+    return sample
 
 
 def create_global_pool(

@@ -187,6 +187,44 @@ class TabAutoSyn:
         """Synthcity DDPM flag: treat ``ml`` as classification, else regression."""
         return "classification" if self.task == "ml" else "regression"
 
+    def _resolve_plugin_params_path(
+        self, params: str | None, plugin_name: str
+    ) -> str | None:
+        """Resolve params source for a plugin.
+
+        ``params`` may be either:
+        - a direct path to a pickled Optuna study file;
+        - a directory containing per-plugin files that start with plugin name
+          (e.g. ``ctgan_*``, ``ddpm_*``, ``dpgan_*``).
+        """
+        if params is None:
+            return None
+
+        params_path = os.path.abspath(params)
+        if os.path.isfile(params_path):
+            return params_path
+
+        if not os.path.isdir(params_path):
+            raise ValueError(
+                f"params path does not exist or is not a file/directory: {params}"
+            )
+
+        candidates = sorted(
+            [
+                os.path.join(params_path, name)
+                for name in os.listdir(params_path)
+                if os.path.isfile(os.path.join(params_path, name))
+                and name.startswith(plugin_name)
+            ]
+        )
+        if not candidates:
+            raise ValueError(
+                f"No params file found for plugin '{plugin_name}' in '{params_path}'. "
+                f"Expected a filename starting with '{plugin_name}'."
+            )
+
+        return candidates[0]
+
     def _generate_synthetics_non_llm(
         self,
         train_data: pd.DataFrame,
@@ -210,7 +248,9 @@ class TabAutoSyn:
             target_column: Target column name when training supervised plugins.
             n_samples: Minimum number of synthetic rows to return (may loop generation until reached).
             custom_metric: Reserved for custom quality objectives during HPO.
-            params: Path to a pickled Optuna study (``joblib``) with ``best_params``; skips fresh HPO when set.
+            params: Either a path to a pickled Optuna study (``joblib``) with ``best_params``,
+                or a directory with per-plugin files whose names start with plugin id
+                (e.g. ``ctgan_*``, ``ddpm_*``, ``dpgan_*``). Skips fresh HPO when set.
             log_params: When ``True``, persist optimization artifacts according to the optimizer configuration.
             log_plugin_params: When ``True`` and ``verbose``, print plugin hyperparameters before fitting.
 
@@ -265,9 +305,10 @@ class TabAutoSyn:
         # Step 2: Extracting existing params
         if params != None:
             try:
-                optimization_result = joblib.load(params)
+                params_path = self._resolve_plugin_params_path(params, plugin_name)
+                optimization_result = joblib.load(params_path)
                 init_kwargs[plugin_name] = optimization_result.best_params
-            except:
+            except Exception as e:
                 raise ValueError(
                     f"Error while using predefined Optuna params: {str(e)}"
                 )
@@ -497,7 +538,8 @@ class TabAutoSyn:
             log_params: Persist HPO studies when optimizing plugin hyperparameters.
             custom_metric: Reserved custom metric hook.
             optimization_trials: Optuna trial count for plugin HPO.
-            params: Pickled study path for warm-started plugin params.
+            params: Pickled study file path, or a directory with per-plugin files
+                prefixed by ``ctgan``/``ddpm``/``dpgan`` for warm-started params.
             target_column: Label column for supervised checks and curation.
             n_generations: GA generations in :meth:`_perform_curation`.
             crossover_prob: GA crossover probability.
@@ -706,7 +748,8 @@ class TabAutoSyn:
             log_params: Persist HPO studies for plugin optimization.
             custom_metric: Reserved metric hook for HPO.
             optimization_trials: Optuna trials when optimizing plugin hyperparameters.
-            params: Path to pickled best params for warm start.
+            params: Pickled study file path, or a directory with per-plugin files
+                prefixed by ``ctgan``/``ddpm``/``dpgan`` for warm-started params.
             target_column: Supervised target for plugin / LLM generation.
 
         Returns:
@@ -993,7 +1036,8 @@ class TabAutoSyn:
             log_params: Passed through to non-LLM generation for HPO logging.
             custom_metric: Reserved for plugin optimization.
             optimization_trials: Optuna trials for plugin HPO when applicable.
-            params: Pickled study path for warm-started synthcity params.
+            params: Pickled study file path, or a directory with per-plugin files
+                prefixed by ``ctgan``/``ddpm``/``dpgan`` for warm-started params.
             temperature: OpenRouter chat sampling temperature for meta-agents.
             max_tokens: Max tokens for meta-agent completions.
             retries: Pydantic-AI agent retry count for dependency discovery.
@@ -1013,6 +1057,13 @@ class TabAutoSyn:
             failures are non-fatal and only disable tracing.
         """
         if train_data is not None:
+            api_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    "OPENROUTER_API_KEY is required for TabAutoSyn.generate(). "
+                    "Set it in the environment (for example in .env) before running."
+                )
+
             langfuse_client = None
             pipeline_trace = None
             try:
@@ -1038,15 +1089,13 @@ class TabAutoSyn:
                             "[yellow]Langfuse tracing initialization skipped due to error.[/yellow]"
                         )
 
-                api_key = os.getenv("OPENROUTER_API_KEY") or ""
                 default_meta_model = os.getenv(
                     "DEFAULT_META_MODEL", "anthropic/claude-haiku-4.5"
                 )
 
-                if not api_key:
-                    raise RuntimeError(
-                        "No OPENROUTER_API_KEY provided. Set it in environment or pass as argument."
-                    )
+                default_user_df_generator_model = os.getenv(
+                    "DEFAULT_USER_DF_GENERATOR_MODEL", "anthropic/claude-opus-4.6"
+                )
 
                 dependency_discovery_model = _create_model(
                     model=default_meta_model,
@@ -1073,7 +1122,7 @@ class TabAutoSyn:
                 )
 
                 user_df_generator_model = _create_model(
-                    model=default_meta_model,
+                    model=default_user_df_generator_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=timeout,
@@ -1119,6 +1168,152 @@ class TabAutoSyn:
                     )
 
                 final_syn_df = pd.DataFrame()
+
+                real_data_info_dict = dataset_processor._extract_dataset_info(
+                    train_data, target_column=target_column
+                )
+                str_real_data_info_dict = json.dumps(
+                    real_data_info_dict, ensure_ascii=False
+                )
+                syn_data_cols = str(train_data.columns.tolist())
+
+                if not user_df_info:
+                    if self.verbose:
+                        print("[cyan]Generating user_df_info from real data chunk...[/cyan]")
+                    real_data_chunk = train_data.sample(
+                        n=min(10, len(train_data)), random_state=42
+                    )
+                    str_real_data_chunk = json.dumps(
+                        real_data_chunk.to_dict(orient="records"),
+                        ensure_ascii=False,
+                    )
+                    user_df_info_generator = Agent(
+                        name="UserDfInfoGenerator",
+                        model=user_df_generator_model,
+                        system_prompt=(
+                            USER_DF_INFO_GENERATOR_PROMPT.safe_substitute(
+                                columns=syn_data_cols,
+                                real_data_chunk=str_real_data_chunk,
+                            )
+                        ),
+                        instrument=True,
+                    )
+                    user_df_info_result = await user_df_info_generator.run(
+                        "Generate dataset description."
+                    )
+                    user_df_info = (
+                        str(user_df_info_result.output)
+                        .strip()
+                        .splitlines()[0]
+                        .strip()
+                        .strip('"')
+                    )
+                    if self.verbose:
+                        print(f"[green]Generated user_df_info:[/green] {user_df_info}")
+                elif self.verbose:
+                    print("[cyan]Using provided user_df_info.[/cyan]")
+
+                if self.verbose:
+                    RICH_CONSOLE.print()
+                    RICH_CONSOLE.print(
+                        Rule(
+                            "[bold magenta]🔗 Dependency discovery[/bold magenta] [dim]· shared for all plugins ·[/dim]",
+                            style="magenta",
+                        )
+                    )
+
+                dep_discovery_span = _safe_langfuse_trace(
+                    langfuse_client,
+                    name="DependencyDiscoveryAgent",
+                    input_payload={
+                        "columns": (
+                            syn_data_cols[:4000]
+                            if len(syn_data_cols) > 4000
+                            else syn_data_cols
+                        ),
+                        "plugins": plugins,
+                    },
+                    metadata={
+                        "source": "tabautosyn.generate",
+                        "agent": "DependencyDiscoveryAgent",
+                        "scope": "shared_all_plugins",
+                    },
+                    new_trace=True,
+                )
+                try:
+                    dependency_discovery_agent = Agent(
+                        name="DependencyDiscoveryAgent",
+                        model=dependency_discovery_model,
+                        system_prompt=(
+                            DEPENDENCY_DISCOVERY_PROMPT.safe_substitute(
+                                domain_description=user_df_info,
+                                columns=syn_data_cols,
+                                statistics=str_real_data_info_dict,
+                            )
+                        ),
+                        retries=retries,
+                        instrument=False,
+                    )
+
+                    dependency_discovery_result = await dependency_discovery_agent.run()
+                    dependency_discovery_result = str(
+                        dependency_discovery_result.output
+                    ).strip()
+                    if dependency_discovery_result.startswith("```json"):
+                        dependency_discovery_result = dependency_discovery_result[
+                            len("```json") :
+                        ].strip()
+                    elif dependency_discovery_result.startswith("```"):
+                        dependency_discovery_result = dependency_discovery_result[
+                            len("```") :
+                        ].strip()
+                    if dependency_discovery_result.endswith("```"):
+                        dependency_discovery_result = dependency_discovery_result[
+                            :-3
+                        ].strip()
+                    dependency_discovery_result = json.loads(
+                        dependency_discovery_result
+                    )
+
+                    dep_summary = {
+                        dep_type: len(dep_items)
+                        for dep_type, dep_items in dependency_discovery_result.get(
+                            "dependencies", {}
+                        ).items()
+                        if dep_items
+                    }
+                    _deps_out = langfuse_output_payload(
+                        dependency_discovery_result.get("dependencies") or {},
+                        key="dependencies",
+                    )
+                    _safe_langfuse_update(
+                        dep_discovery_span,
+                        output_payload={
+                            "dependency_summary": dep_summary,
+                            "dependency_types": list(
+                                (
+                                    dependency_discovery_result.get("dependencies")
+                                    or {}
+                                ).keys()
+                            ),
+                            **_deps_out,
+                        },
+                    )
+                except Exception as e:
+                    _safe_langfuse_update(
+                        dep_discovery_span,
+                        output_payload={"error": str(e)},
+                        level="ERROR",
+                        status_message=str(e),
+                    )
+                    raise
+                finally:
+                    _safe_langfuse_end(dep_discovery_span)
+                if self.verbose:
+                    RICH_CONSOLE.print(
+                        "[magenta]Dependency discovery summary[/magenta] "
+                        f"[dim]· shared ·[/dim] {dep_summary}"
+                    )
 
                 for plugin_idx, plugin_name in enumerate(plugins, start=1):
                     plugin_span = _safe_langfuse_span(
@@ -1195,162 +1390,11 @@ class TabAutoSyn:
                             f"outliers {outlier_rows_before} -> {len(syn_outliers)}."
                         )
 
-                    real_data_info_dict = dataset_processor._extract_dataset_info(
-                        train_data, target_column=target_column
-                    )
-                    str_real_data_info_dict = json.dumps(
-                        real_data_info_dict, ensure_ascii=False
-                    )
-                    syn_data_cols = str(syn_df.columns.tolist())
-
-                    if not user_df_info:
-                        if self.verbose:
-                            print(
-                                "[cyan]Generating user_df_info from real data chunk...[/cyan]"
-                            )
-                        real_data_chunk = train_data.sample(
-                            n=min(10, len(train_data)), random_state=42
-                        )
-                        str_real_data_chunk = json.dumps(
-                            real_data_chunk.to_dict(orient="records"),
-                            ensure_ascii=False,
-                        )
-                        user_df_info_generator = Agent(
-                            name="UserDfInfoGenerator",
-                            model=user_df_generator_model,
-                            system_prompt=(
-                                USER_DF_INFO_GENERATOR_PROMPT.safe_substitute(
-                                    columns=syn_data_cols,
-                                    real_data_chunk=str_real_data_chunk,
-                                )
-                            ),
-                            instrument=True,
-                        )
-                        user_df_info_result = await user_df_info_generator.run(
-                            "Generate dataset description."
-                        )
-                        user_df_info = (
-                            str(user_df_info_result.output)
-                            .strip()
-                            .splitlines()[0]
-                            .strip()
-                            .strip('"')
-                        )
-                        if self.verbose:
-                            print(
-                                f"[green]Generated user_df_info:[/green] {user_df_info}"
-                            )
-                    elif self.verbose:
-                        print("[cyan]Using provided user_df_info.[/cyan]")
-
                     if self.verbose:
                         RICH_CONSOLE.print()
                         RICH_CONSOLE.print(
                             Rule(
-                                "[bold magenta]🔗 Dependency discovery[/bold magenta] "
-                                f"[dim]· plugin {plugin_name} ·[/dim]",
-                                style="magenta",
-                            )
-                        )
-
-                    dep_discovery_span = _safe_langfuse_trace(
-                        langfuse_client,
-                        name="DependencyDiscoveryAgent",
-                        input_payload={
-                            "plugin": plugin_name,
-                            "columns": (
-                                syn_data_cols[:4000]
-                                if len(syn_data_cols) > 4000
-                                else syn_data_cols
-                            ),
-                        },
-                        metadata={
-                            "plugin": plugin_name,
-                            "source": "tabautosyn.generate",
-                            "agent": "DependencyDiscoveryAgent",
-                        },
-                        new_trace=True,
-                    )
-                    try:
-                        dependency_discovery_agent = Agent(
-                            name="DependencyDiscoveryAgent",
-                            model=dependency_discovery_model,
-                            system_prompt=(
-                                DEPENDENCY_DISCOVERY_PROMPT.safe_substitute(
-                                    domain_description=user_df_info,
-                                    columns=syn_data_cols,
-                                    statistics=str_real_data_info_dict,
-                                )
-                            ),
-                            retries=retries,
-                            instrument=False,
-                        )
-
-                        dependency_discovery_result = (
-                            await dependency_discovery_agent.run()
-                        )
-                        dependency_discovery_result = str(
-                            dependency_discovery_result.output
-                        ).strip()
-                        if dependency_discovery_result.startswith("```json"):
-                            dependency_discovery_result = dependency_discovery_result[
-                                len("```json") :
-                            ].strip()
-                        elif dependency_discovery_result.startswith("```"):
-                            dependency_discovery_result = dependency_discovery_result[
-                                len("```") :
-                            ].strip()
-                        if dependency_discovery_result.endswith("```"):
-                            dependency_discovery_result = dependency_discovery_result[
-                                :-3
-                            ].strip()
-                        dependency_discovery_result = json.loads(
-                            dependency_discovery_result
-                        )
-
-                        dep_summary = {
-                            dep_type: len(dep_items)
-                            for dep_type, dep_items in dependency_discovery_result.get(
-                                "dependencies", {}
-                            ).items()
-                            if dep_items
-                        }
-                        _deps_out = langfuse_output_payload(
-                            dependency_discovery_result.get("dependencies") or {},
-                            key="dependencies",
-                        )
-                        _safe_langfuse_update(
-                            dep_discovery_span,
-                            output_payload={
-                                "dependency_summary": dep_summary,
-                                "dependency_types": list(
-                                    (
-                                        dependency_discovery_result.get("dependencies")
-                                        or {}
-                                    ).keys()
-                                ),
-                                **_deps_out,
-                            },
-                        )
-                    except Exception as e:
-                        _safe_langfuse_update(
-                            dep_discovery_span,
-                            output_payload={"error": str(e)},
-                            level="ERROR",
-                            status_message=str(e),
-                        )
-                        raise
-                    finally:
-                        _safe_langfuse_end(dep_discovery_span)
-                    if self.verbose:
-                        RICH_CONSOLE.print(
-                            f"[magenta]Dependency discovery summary[/magenta] "
-                            f"[dim]· {plugin_name} ·[/dim] {dep_summary}"
-                        )
-                        RICH_CONSOLE.print()
-                        RICH_CONSOLE.print(
-                            Rule(
-                                "[bold yellow]🛠 Dependency fixer[/bold yellow] "
+                                "[bold yellow] 🛠 Dependency fixer[/bold yellow] "
                                 f"[dim]· plugin {plugin_name} ·[/dim]",
                                 style="yellow",
                             )
@@ -1571,6 +1615,8 @@ class TabAutoSyn:
                     langfuse_client.flush()
                 return final_syn_df.reset_index(drop=True)
 
+            except RuntimeError:
+                raise
             except Exception as e:
                 RICH_CONSOLE.print_exception(show_locals=False)
                 _safe_langfuse_update(
