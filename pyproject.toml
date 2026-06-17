@@ -43,6 +43,7 @@ dependencies = [
     "toon-format",
     "transformers<4.50",
     "tqdm>=4.65",
+    "timm>=1.0",
     "xgboost>=2.0",
 ]
 

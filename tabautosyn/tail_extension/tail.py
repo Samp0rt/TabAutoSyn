@@ -19,6 +19,15 @@ from .Matrix import (
 _TAIL_CONSOLE = Console()
 
 
+def _numeric_finite_frame(df: pd.DataFrame, cols: list[str], name: str) -> pd.DataFrame:
+    """Return a float-only finite dataframe aligned to *cols*."""
+    numeric = df.loc[:, cols].apply(pd.to_numeric, errors="coerce")
+    numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+    if numeric.empty:
+        raise ValueError(f"{name} has no finite numeric rows for tail extension")
+    return numeric.astype(float)
+
+
 # ==========================================================
 # DISTANCE METRICS
 # ==========================================================
@@ -26,7 +35,9 @@ _TAIL_CONSOLE = Console()
 
 def robust_mahalanobis_distances(X, center=None, cov=None):
     """Compute robust Mahalanobis distances for each sample in X."""
-    X = np.asarray(X)
+    X = np.asarray(X, dtype=float)
+    center = None if center is None else np.asarray(center, dtype=float)
+    cov = None if cov is None else np.asarray(cov, dtype=float)
     if center is None:
         center = np.mean(X, axis=0)
     if cov is None:
@@ -53,6 +64,12 @@ def energy_distance(X, Y):
 
 def kde_js_divergence(X, Y, bandwidth=0.2, grid_size=800, random_state=0):
     """Compute Jensen-Shannon divergence using KDE approximation."""
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if X.size == 0 and Y.size == 0:
+        return 0.0
+    if X.size == 0 or Y.size == 0:
+        return 1.0
     rng = np.random.default_rng(random_state)
     X_comb = np.vstack([X, Y])
     mins, maxs = X_comb.min(axis=0), X_comb.max(axis=0)
@@ -76,6 +93,10 @@ def js_divergence_fast(X, Y, method="hist", bins=50):
     """Fast JS divergence approximation using histograms or entropy."""
     X = np.asarray(X).ravel()
     Y = np.asarray(Y).ravel()
+    if X.size == 0 and Y.size == 0:
+        return 0.0
+    if X.size == 0 or Y.size == 0:
+        return 1.0
 
     xmin = min(X.min(), Y.min())
     xmax = max(X.max(), Y.max())
@@ -209,6 +230,12 @@ def compute_weighted_divergence(
         return frob_dist
 
     # Feature-wise metrics (with weighting)
+    n_a, n_b = Xa.shape[0], Xb.shape[0]
+    if n_a == 0 and n_b == 0:
+        return 0.0
+    if n_a == 0 or n_b == 0:
+        return 1.0
+
     total = 0.0
     for j in range(Xa.shape[1]):
         if divergence_metric == "js":
@@ -325,17 +352,20 @@ def correct_tails_by_adding(
     """
     rng = np.random.default_rng(random_state)
     cols = df_real.columns.tolist()
+    df_real = _numeric_finite_frame(df_real, cols, "df_real")
+    df_syn = _numeric_finite_frame(df_syn, cols, "df_syn")
+    df_syn_tail = _numeric_finite_frame(df_syn_tail, cols, "df_syn_tail")
 
     # === Normalization ===
     if scaler:
         scaler_obj = RobustScaler()
-        Xr = scaler_obj.fit_transform(df_real.values)
-        Xs = scaler_obj.transform(df_syn.values)
-        Xt = scaler_obj.transform(df_syn_tail.values)
+        Xr = scaler_obj.fit_transform(df_real.to_numpy(dtype=float))
+        Xs = scaler_obj.transform(df_syn.to_numpy(dtype=float))
+        Xt = scaler_obj.transform(df_syn_tail.to_numpy(dtype=float))
     else:
-        Xr = df_real.values
-        Xs = df_syn.values
-        Xt = df_syn_tail.values
+        Xr = df_real.to_numpy(dtype=float)
+        Xs = df_syn.to_numpy(dtype=float)
+        Xt = df_syn_tail.to_numpy(dtype=float)
 
     # === Distance computation setup ===
     center = np.mean(Xr, axis=0)

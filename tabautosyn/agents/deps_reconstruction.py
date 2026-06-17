@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from rich.console import Console
 from rich import print
@@ -72,6 +72,13 @@ class DependencyFixer:
     ranges are refined with an LLM via :meth:`fix_dependencies_async`.
     """
 
+    _MAX_SINGLE_FILTER_DROP_FRACTION = 0.60
+    _MIN_FILTERED_ROWS_FRACTION = 0.35
+    _ENCODING_CHECKER_MAX_ANCHORS_PER_RUN = 60
+    _DUPLICATE_RETRY_TEMPERATURE_START = 0.35
+    _DUPLICATE_RETRY_TEMPERATURE_STEP = 0.15
+    _DUPLICATE_RETRY_TEMPERATURE_MAX = 0.90
+
     def __init__(
         self, syn_df: pd.DataFrame, real_df: pd.DataFrame, dependencies: dict[str, list]
     ):
@@ -81,8 +88,17 @@ class DependencyFixer:
         self.dependencies = self._filter_dependencies(dependencies)
         self._pending_llm_dependent_ranges: list[dict] = []
         self._had_llm_dependent_range_pass: bool = False
+        self._row_filter_baseline_count: int = len(self.syn_df)
         self.verbose: bool = False
         self._fixer_segment_label: str | None = None
+        self.llm_usage_summary: dict[str, float | int] = {
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        self.per_agent_usage_summary: dict[str, dict[str, float | int]] = {}
 
     @property
     def had_llm_dependent_range_pass(self) -> bool:
@@ -91,12 +107,166 @@ class DependencyFixer:
 
     @staticmethod
     def _filter_dependencies(dependencies: dict):
-        """Keep only dependencies whose confidence is at least 0.7."""
+        """Keep dependencies whose confidence is at least 0.7.
+
+        LLM discovery is schema-guided but not schema-guaranteed; skip malformed
+        entries instead of treating them as trusted dependencies.
+        """
+        filtered: dict[str, list[dict]] = {}
+        for dep_type, deps in (dependencies or {}).items():
+            if not isinstance(deps, list):
+                continue
+
+            kept = []
+            for dep in deps:
+                if not isinstance(dep, dict):
+                    continue
+                normalized_dep = dep.copy()
+                if "confidence" not in normalized_dep:
+                    continue
+                try:
+                    confidence = float(normalized_dep["confidence"])
+                except (TypeError, ValueError):
+                    continue
+                normalized_dep["confidence"] = confidence
+                if confidence >= 0.7:
+                    kept.append(normalized_dep)
+
+            if kept:
+                filtered[dep_type] = kept
+
+        return filtered
+
+    @staticmethod
+    def _extract_usage_summary(run_result: Any) -> dict[str, float | int]:
+        """Extract token/cost counters from a Pydantic-AI run result."""
+        usage_obj = None
+        try:
+            usage_obj = run_result.usage()
+        except Exception:
+            return {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+            }
+
+        def _as_int(value: Any) -> int:
+            if value is None:
+                return 0
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        def _as_float(value: Any) -> float:
+            if value is None:
+                return 0.0
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        requests = _as_int(getattr(usage_obj, "requests", 0))
+        input_tokens = _as_int(
+            getattr(usage_obj, "input_tokens", getattr(usage_obj, "request_tokens", 0))
+        )
+        output_tokens = _as_int(
+            getattr(usage_obj, "output_tokens", getattr(usage_obj, "response_tokens", 0))
+        )
+        total_tokens_raw = getattr(usage_obj, "total_tokens", None)
+        total_tokens = _as_int(
+            total_tokens_raw if total_tokens_raw is not None else input_tokens + output_tokens
+        )
+        cost_usd = _as_float(
+            getattr(usage_obj, "cost", getattr(usage_obj, "total_cost", 0.0))
+        )
+
         return {
-            dep_type: [dep for dep in deps if float(dep["confidence"]) >= 0.7]
-            for dep_type, deps in dependencies.items()
-            if any(float(dep["confidence"]) >= 0.7 for dep in deps)
+            "requests": requests,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": cost_usd,
         }
+
+    def _accumulate_usage_summary(
+        self, run_result: Any, agent_name: str | None = None
+    ) -> None:
+        usage = self._extract_usage_summary(run_result)
+        self.llm_usage_summary["requests"] += int(usage["requests"])
+        self.llm_usage_summary["input_tokens"] += int(usage["input_tokens"])
+        self.llm_usage_summary["output_tokens"] += int(usage["output_tokens"])
+        self.llm_usage_summary["total_tokens"] += int(usage["total_tokens"])
+        self.llm_usage_summary["cost_usd"] += float(usage["cost_usd"])
+        if agent_name:
+            if agent_name not in self.per_agent_usage_summary:
+                self.per_agent_usage_summary[agent_name] = {
+                    "requests": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "cost_usd": 0.0,
+                }
+            self.per_agent_usage_summary[agent_name]["requests"] += int(
+                usage["requests"]
+            )
+            self.per_agent_usage_summary[agent_name]["input_tokens"] += int(
+                usage["input_tokens"]
+            )
+            self.per_agent_usage_summary[agent_name]["output_tokens"] += int(
+                usage["output_tokens"]
+            )
+            self.per_agent_usage_summary[agent_name]["total_tokens"] += int(
+                usage["total_tokens"]
+            )
+            self.per_agent_usage_summary[agent_name]["cost_usd"] += float(
+                usage["cost_usd"]
+            )
+
+    def _filter_rows_conservatively(
+        self,
+        syn_df: pd.DataFrame,
+        keep_mask: Any,
+        dep_type: str,
+        expression: str,
+    ) -> pd.DataFrame:
+        """Apply a row filter unless it would remove a suspiciously large slice."""
+        try:
+            before = len(syn_df)
+            if before == 0:
+                return syn_df
+
+            kept = int(keep_mask.sum())
+            dropped = before - kept
+            if dropped <= 0:
+                return syn_df
+
+            single_drop_fraction = dropped / before
+            baseline = max(self._row_filter_baseline_count, 1)
+            total_keep_fraction = kept / baseline
+
+            too_aggressive = (
+                single_drop_fraction > self._MAX_SINGLE_FILTER_DROP_FRACTION
+                or total_keep_fraction < self._MIN_FILTERED_ROWS_FRACTION
+            )
+            if too_aggressive:
+                if self.verbose:
+                    print(
+                        "[yellow]Skipping aggressive dependency filter[/yellow] "
+                        f"({dep_type}: {expression!r}) would drop {dropped}/{before} rows."
+                    )
+                return syn_df
+
+            return syn_df[keep_mask]
+        except Exception as exc:
+            if self.verbose:
+                print(
+                    "[yellow]Skipping invalid dependency filter[/yellow] "
+                    f"({dep_type}: {expression!r}): {exc}"
+                )
+            return syn_df
 
     def _fix_mapping(
         self, mapping: list[dict], real_df: pd.DataFrame, syn_df: pd.DataFrame
@@ -312,16 +482,21 @@ class DependencyFixer:
                     if not valid:
                         mask[idx] = False
 
-            syn_df = syn_df[mask]
+            syn_df = self._filter_rows_conservatively(
+                syn_df,
+                mask,
+                "dependent_range",
+                dep.get("expression", ""),
+            )
 
         return syn_df.reset_index(drop=True)
 
     def _fix_rule(self, rule: dict, real_df: pd.DataFrame, syn_df: pd.DataFrame):
         """Fix rule-based dependencies (e.g. ``age >= 0``).
 
-        The expression is first validated against the real data — if it
-        does not hold universally there, the rule is skipped. Otherwise,
-        synthetic rows violating the rule are dropped.
+        The expression is first validated against the real data. Invalid
+        expressions are skipped; valid synthetic violations are filtered
+        conservatively.
         """
         for dep in rule:
             columns = dep["columns"]
@@ -334,14 +509,41 @@ class DependencyFixer:
 
             real_expression = self._sub_columns(expression, columns, "real_df")
 
-            result = eval(real_expression)
-            if not all(result):
+            try:
+                result = eval(real_expression)
+                if not all(result):
+                    continue
+            except Exception as exc:
+                if self.verbose:
+                    print(
+                        "[yellow]Skipping invalid rule dependency[/yellow] "
+                        f"({expression!r}): {exc}"
+                    )
                 continue
 
-            syn_expression = self._sub_columns(expression, columns, "syn_df")
+            syn_work = syn_df.copy()
+            for col in columns:
+                if col in syn_work.columns and col in real_df.columns:
+                    syn_work[col] = self._align_syn_series_dtype(
+                        real_df[col], syn_work[col]
+                    )
+            syn_expression = self._sub_columns(expression, columns, "syn_work")
 
-            eval_result = eval(syn_expression)
-            syn_df = syn_df[eval_result]
+            try:
+                eval_result = eval(syn_expression, {"syn_work": syn_work})
+            except Exception as exc:
+                if self.verbose:
+                    print(
+                        "[yellow]Skipping invalid synthetic rule dependency[/yellow] "
+                        f"({expression!r}): {exc}"
+                    )
+                continue
+            syn_df = self._filter_rows_conservatively(
+                syn_df,
+                eval_result,
+                "rule",
+                expression,
+            )
 
         return syn_df.reset_index(drop=True)
 
@@ -356,9 +558,15 @@ class DependencyFixer:
                 continue
 
             for col in columns:
-                col_min = real_df[col].min()
-                col_max = real_df[col].max()
-                syn_df[col] = syn_df[col].clip(lower=col_min, upper=col_max)
+                if col not in syn_df.columns:
+                    continue
+                real_series = real_df[col]
+                if not pd.api.types.is_numeric_dtype(real_series):
+                    continue
+                aligned = self._align_syn_series_dtype(real_series, syn_df[col])
+                col_min = real_series.min()
+                col_max = real_series.max()
+                syn_df[col] = aligned.clip(lower=col_min, upper=col_max)
 
         return syn_df.reset_index(drop=True)
 
@@ -391,7 +599,10 @@ class DependencyFixer:
                 result = eval(real_expression)
             except (SyntaxError, TypeError, NameError, ValueError):
                 continue
-            if not all(result):
+            try:
+                if not all(result):
+                    continue
+            except (TypeError, ValueError):
                 continue
 
             target_col, formula = self._split_correspondence(expression, columns)
@@ -410,7 +621,12 @@ class DependencyFixer:
                     eval_result = eval(syn_expression)
                 except (SyntaxError, TypeError, NameError, ValueError):
                     continue
-                syn_df = syn_df[eval_result]
+                syn_df = self._filter_rows_conservatively(
+                    syn_df,
+                    eval_result,
+                    "correspondence",
+                    expression,
+                )
 
         return syn_df.reset_index(drop=True)
 
@@ -461,9 +677,8 @@ class DependencyFixer:
         ``[if] <condition> then <consequence>``
         (e.g. ``if hours-per-week >= 40 then income == 1``).
 
-        Rows where the condition holds but the consequence does not
-        are dropped. The rule is skipped if it does not hold in the
-        real data.
+        Rows where the condition holds but the consequence does not are
+        filtered conservatively. Invalid expressions are skipped.
         """
         for dep in logic:
             columns = dep["columns"]
@@ -494,9 +709,9 @@ class DependencyFixer:
             try:
                 cond_mask_real = eval(real_condition)
                 cons_mask_real = eval(real_consequence)
-            except (SyntaxError, TypeError, NameError):
-                continue
-            if not all(cons_mask_real[cond_mask_real]):
+                if not all(cons_mask_real[cond_mask_real]):
+                    continue
+            except (SyntaxError, TypeError, NameError, ValueError):
                 continue
 
             syn_condition = self._sub_columns(condition_expr, columns, "syn_df")
@@ -505,10 +720,18 @@ class DependencyFixer:
             try:
                 cond_mask = eval(syn_condition)
                 cons_mask = eval(syn_consequence)
-            except (SyntaxError, TypeError, NameError):
+                violating = cond_mask & ~cons_mask
+            except (SyntaxError, TypeError, NameError, ValueError):
                 continue
-            violating = cond_mask & ~cons_mask
-            syn_df = syn_df[~violating]
+            if not violating.any():
+                continue
+
+            syn_df = self._filter_rows_conservatively(
+                syn_df,
+                ~violating,
+                "logic",
+                expression,
+            )
 
         return syn_df.reset_index(drop=True)
 
@@ -529,13 +752,24 @@ class DependencyFixer:
             expression = self._strip_spaces(expression, columns)
 
             real_expression = self._sub_columns(expression, columns, "real_df")
-            result = eval(real_expression)
-            if not all(result):
+            try:
+                result = eval(real_expression)
+                if not all(result):
+                    continue
+            except (SyntaxError, TypeError, NameError, ValueError):
                 continue
 
             syn_expression = self._sub_columns(expression, columns, "syn_df")
-            eval_result = eval(syn_expression)
-            syn_df = syn_df[eval_result]
+            try:
+                eval_result = eval(syn_expression)
+            except (SyntaxError, TypeError, NameError, ValueError):
+                continue
+            syn_df = self._filter_rows_conservatively(
+                syn_df,
+                eval_result,
+                "temporal_ordering",
+                expression,
+            )
 
         return syn_df.reset_index(drop=True)
 
@@ -544,14 +778,15 @@ class DependencyFixer:
     ):
         """Fix uniqueness dependencies across column combinations.
 
-        Verifies that the combination of columns is unique in the real
-        data. If so, builds a lookup keyed by the anchor column and
-        overwrites non-anchor columns in the synthetic data to restore
-        the unique mapping.
+        Verifies that the combination of columns is unique in the real data.
+        If so, duplicate synthetic combinations are filtered conservatively.
+        This deliberately does not rewrite non-anchor columns from a real-data
+        lookup: uniqueness of a column tuple is not a functional dependency
+        from the anchor to every other column, and rewriting can collapse many
+        synthetic rows into full duplicates.
         """
         for dep in uniqueness:
             columns = dep["columns"]
-            anchor_column = dep["anchor_column"]
 
             if not self._check_columns_in_real(columns, real_df):
                 continue
@@ -559,34 +794,18 @@ class DependencyFixer:
             if len(columns) < 2:
                 continue
 
-            holds_in_real = True
-
-            set_of_values = set()
-            for idx, row in real_df.iterrows():
-                t = tuple(row[col] for col in columns)
-                if t in set_of_values:
-                    holds_in_real = False
-                    break
-                set_of_values.add(t)
-
-            if not holds_in_real:
+            if real_df.duplicated(subset=columns, keep=False).any():
                 continue
 
-            anchor_idx = columns.index(anchor_column)
-            uniqueness_dict = {}
-            for el in set_of_values:
-                uniqueness_dict[el[anchor_idx]] = el
+            keep_mask = ~syn_df.duplicated(subset=columns, keep="first")
+            syn_df = self._filter_rows_conservatively(
+                syn_df,
+                keep_mask,
+                "uniqueness",
+                dep.get("expression", f"unique({', '.join(columns)})"),
+            )
 
-            for idx, row in syn_df.iterrows():
-                cols_tuple = uniqueness_dict.get(row[anchor_column])
-                if cols_tuple is None:
-                    continue
-                for col_idx, col in enumerate(columns):
-                    if col == anchor_column:
-                        continue
-                    syn_df.at[idx, col] = cols_tuple[col_idx]
-
-        return syn_df
+        return syn_df.reset_index(drop=True)
 
     _PROTECTED_KEYWORDS = ["or", "and", "not", "in", "is"]
 
@@ -639,6 +858,22 @@ class DependencyFixer:
         return True
 
     @staticmethod
+    def _align_syn_series_dtype(
+        real_series: pd.Series, syn_series: pd.Series
+    ) -> pd.Series:
+        """Coerce synthetic values to the real column dtype when possible."""
+        target_dtype = real_series.dtype
+        if pd.api.types.is_numeric_dtype(target_dtype):
+            coerced = pd.to_numeric(syn_series, errors="coerce")
+            if pd.api.types.is_integer_dtype(target_dtype):
+                coerced = coerced.round()
+            try:
+                return coerced.astype(target_dtype)
+            except (TypeError, ValueError):
+                return coerced
+        return syn_series
+
+    @staticmethod
     def split_dependent_ranges_for_processing(
         deps: list[dict],
     ) -> tuple[list[dict], list[dict]]:
@@ -663,9 +898,175 @@ class DependencyFixer:
         anchor_df = pd.DataFrame()
         for column in unique_anchors:
             single_anchor_df = real_data[real_data[anchor_column] == column]
-            single_anchor_sample = single_anchor_df.sample(5)
+            sample_size = min(5, len(single_anchor_df))
+            if sample_size == 0:
+                continue
+            single_anchor_sample = single_anchor_df.sample(n=sample_size)
             anchor_df = pd.concat([anchor_df, single_anchor_sample])
         return anchor_df
+
+    @classmethod
+    def _encoding_checker_sample_chunks(
+        cls, anchor_df: pd.DataFrame, anchor_column: str
+    ) -> list[pd.DataFrame]:
+        """Split full encoding-checker context by anchor values to fit model context."""
+        if anchor_df.empty or anchor_column not in anchor_df.columns:
+            return [anchor_df]
+
+        unique_anchors = list(anchor_df[anchor_column].drop_duplicates())
+        max_anchors = cls._ENCODING_CHECKER_MAX_ANCHORS_PER_RUN
+        if len(unique_anchors) <= max_anchors:
+            return [anchor_df]
+
+        chunks: list[pd.DataFrame] = []
+        for start in range(0, len(unique_anchors), max_anchors):
+            anchors = unique_anchors[start : start + max_anchors]
+            non_null_anchors = [anchor for anchor in anchors if pd.notna(anchor)]
+            mask = anchor_df[anchor_column].isin(non_null_anchors)
+            if any(pd.isna(anchor) for anchor in anchors):
+                mask = mask | anchor_df[anchor_column].isna()
+            chunks.append(anchor_df[mask])
+        return chunks
+
+    @staticmethod
+    def _merge_encoding_checker_results(results: list[dict]) -> dict:
+        """Combine EncodingChecker chunk outputs into one result."""
+        if not results:
+            return {
+                "encoding_detected": False,
+                "encoding_kind": "none",
+                "confidence": 1.0,
+                "readable_mapping": {},
+            }
+
+        readable_mapping: dict[str, dict] = {}
+        kinds: set[str] = set()
+        confidences: list[float] = []
+        encoding_detected = False
+
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            encoding_detected = encoding_detected or bool(
+                result.get("encoding_detected")
+            )
+            kind = result.get("encoding_kind")
+            if kind and kind != "none":
+                kinds.add(str(kind))
+            try:
+                confidences.append(float(result.get("confidence", 1.0)))
+            except (TypeError, ValueError):
+                pass
+
+            chunk_mapping = result.get("readable_mapping") or {}
+            if not isinstance(chunk_mapping, dict):
+                continue
+            for col, col_mapping in chunk_mapping.items():
+                if not isinstance(col_mapping, dict):
+                    continue
+                readable_mapping.setdefault(col, {}).update(col_mapping)
+
+        if not encoding_detected:
+            encoding_kind = "none"
+        elif len(kinds) == 1:
+            encoding_kind = next(iter(kinds))
+        else:
+            encoding_kind = "mixed"
+
+        return {
+            "encoding_detected": encoding_detected,
+            "encoding_kind": encoding_kind,
+            "confidence": min(confidences) if confidences else 1.0,
+            "readable_mapping": readable_mapping,
+        }
+
+    @staticmethod
+    def _coerce_corrected_value(value: Any, target_dtype: Any) -> Any:
+        """Cast detector corrections to the destination column dtype when possible."""
+        try:
+            if pd.api.types.is_float_dtype(target_dtype):
+                return float(value)
+            if pd.api.types.is_integer_dtype(target_dtype):
+                return int(float(value))
+            if pd.api.types.is_bool_dtype(target_dtype):
+                if isinstance(value, str):
+                    return value.strip().lower() in {"true", "1", "yes"}
+                return bool(value)
+            if pd.api.types.is_string_dtype(target_dtype) or target_dtype == object:
+                return str(value)
+        except (TypeError, ValueError):
+            return value
+        return value
+
+    @staticmethod
+    def _duplicate_labels_for_indices(
+        df: pd.DataFrame, row_labels: list[Any] | set[Any]
+    ) -> list[Any]:
+        """Return labels from *row_labels* whose full rows duplicate any row in *df*."""
+        if df.empty or not row_labels:
+            return []
+        duplicate_mask = df.duplicated(keep=False)
+        return [
+            label
+            for label in row_labels
+            if label in duplicate_mask.index and bool(duplicate_mask.loc[label])
+        ]
+
+    @staticmethod
+    def _duplicate_retry_note(
+        df: pd.DataFrame,
+        duplicate_labels: list[Any],
+        dependent_cols: list[str],
+        max_context_rows: int = 20,
+    ) -> str:
+        """Build duplicate feedback for a retry on previously invalid rows only."""
+        duplicate_context = df[df.duplicated(keep=False)].head(max_context_rows)
+        forbidden_tuples = (
+            duplicate_context[dependent_cols]
+            .drop_duplicates()
+            .to_dict(orient="records")
+            if set(dependent_cols).issubset(duplicate_context.columns)
+            else []
+        )
+        return (
+            "\n\nDUPLICATE RETRY:\n"
+            "The previous correction created full-row duplicates. Re-correct ONLY "
+            "the rows in the new batch_rows; these rows were already marked invalid "
+            "by your previous response.\n"
+            "For every row in this retry, return is_valid=false with corrected_values "
+            f"for these dependent columns in order: {dependent_cols}.\n"
+            "Do NOT return corrected_values equal to any forbidden tuple below. "
+            "Those tuples already produced duplicates.\n"
+            f"forbidden corrected_values tuples: {json.dumps(forbidden_tuples, ensure_ascii=False)}\n"
+            "Corrected rows must be dependency-valid and must not duplicate each "
+            "other or any row in duplicate_context.\n"
+            f"Duplicate row labels being retried: {list(duplicate_labels)}\n"
+            "duplicate_context full rows:\n"
+            f"{json.dumps(duplicate_context.to_dict(orient='records'), ensure_ascii=False)}\n"
+        )
+
+    @classmethod
+    def _duplicate_retry_model_settings(
+        cls, duplicate_retry_count: int
+    ) -> ModelSettings | None:
+        """Increase temperature only for duplicate-resolution retries."""
+        if duplicate_retry_count <= 0:
+            return None
+        temperature = min(
+            cls._DUPLICATE_RETRY_TEMPERATURE_MAX,
+            cls._DUPLICATE_RETRY_TEMPERATURE_START
+            + cls._DUPLICATE_RETRY_TEMPERATURE_STEP * (duplicate_retry_count - 1),
+        )
+        return {"temperature": temperature}
+
+    @staticmethod
+    def _duplicate_summary_text(df: pd.DataFrame) -> str:
+        n_rows = len(df)
+        n_unique = len(df.drop_duplicates()) if n_rows else 0
+        return (
+            f"rows={n_rows}, duplicate_rows={n_rows - n_unique}, "
+            f"unique_rows={n_unique}"
+        )
 
     async def llm_refine_dependent_ranges(
         self,
@@ -697,11 +1098,15 @@ class DependencyFixer:
             "dependent_range_count": len(dependent_ranges),
             "batch_size": batch_size,
             "max_attempts_per_batch": max_attempts,
+            "max_duplicate_retries_per_batch": max(5, max_attempts),
             "encoding_check_runs": 0,
             "detector_batches_attempted": 0,
             "detector_batches_applied": 0,
             "detector_batches_skipped_invalid_response": 0,
             "detector_failed_attempts": 0,
+            "detector_duplicate_retries": 0,
+            "detector_duplicate_retry_temperatures": [],
+            "detector_invalid_rows_dropped_after_duplicate_retries": 0,
             "model_cells_updated": 0,
         }
 
@@ -718,68 +1123,179 @@ class DependencyFixer:
             for range_idx, dependent_range in enumerate(dependent_ranges, start=1):
                 anchor_col_name = dependent_range.get("anchor_column")
                 anchor_df = self.anchor_samples_for_range(real_df, dependent_range)
-                if self.verbose and range_status is not None:
-                    range_status.update(
-                        f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
-                        f"[yellow]{anchor_col_name}[/yellow] · "
-                        f"{len(anchor_df)} context rows · encoding…"
-                    )
+                anchor_column = dependent_range["anchor_column"]
+                unique_anchor_count = (
+                    anchor_df[anchor_column].nunique(dropna=False)
+                    if anchor_column in anchor_df.columns
+                    else 0
+                )
+                use_chunked_encoding = (
+                    unique_anchor_count > self._ENCODING_CHECKER_MAX_ANCHORS_PER_RUN
+                )
 
-                enc_meta: dict[str, Any] = {
-                    "agent": "EncodingCheckerAgent",
-                    "range_index": range_idx,
-                    "anchor_column": anchor_col_name,
-                    "segment": self._fixer_segment_label,
-                }
-                if langfuse_encoding_metadata:
-                    enc_meta.update(langfuse_encoding_metadata)
-                enc_span = langfuse_safe_trace(
-                    langfuse_client,
-                    name="EncodingCheckerAgent",
-                    input_payload={
+                if not use_chunked_encoding:
+                    if self.verbose and range_status is not None:
+                        range_status.update(
+                            f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
+                            f"[yellow]{anchor_col_name}[/yellow] · "
+                            f"{len(anchor_df)} context rows · encoding…"
+                        )
+
+                    enc_meta: dict[str, Any] = {
+                        "agent": "EncodingCheckerAgent",
                         "range_index": range_idx,
                         "anchor_column": anchor_col_name,
                         "segment": self._fixer_segment_label,
-                        "context_rows": len(anchor_df),
-                    },
-                    metadata=enc_meta,
-                    new_trace=True,
-                )
-                try:
-                    encoding_checker_agent = Agent(
+                    }
+                    if langfuse_encoding_metadata:
+                        enc_meta.update(langfuse_encoding_metadata)
+                    enc_span = langfuse_safe_trace(
+                        langfuse_client,
                         name="EncodingCheckerAgent",
-                        model=encoding_checker_model,
-                        system_prompt=(
-                            ENCODING_CHECKER_PROMPT.safe_substitute(
-                                dataset_info=user_df_info,
-                                sample=anchor_df.to_dict(orient="records"),
-                                dependency=dependent_range,
-                            )
-                        ),
-                        instrument=False,
+                        input_payload={
+                            "range_index": range_idx,
+                            "anchor_column": anchor_col_name,
+                            "segment": self._fixer_segment_label,
+                            "context_rows": len(anchor_df),
+                        },
+                        metadata=enc_meta,
+                        new_trace=True,
                     )
+                    try:
+                        encoding_checker_agent = Agent(
+                            name="EncodingCheckerAgent",
+                            model=encoding_checker_model,
+                            system_prompt=(
+                                ENCODING_CHECKER_PROMPT.safe_substitute(
+                                    dataset_info=user_df_info,
+                                    sample=anchor_df.to_dict(orient="records"),
+                                    dependency=dependent_range,
+                                )
+                            ),
+                            instrument=False,
+                        )
 
-                    encoding_checker_result = await encoding_checker_agent.run()
-                    encoding_checker_result = encoding_checker_result.output.strip(
-                        "```json\n"
-                    ).strip("\n```")
-                    encoding_checker_result = json.loads(encoding_checker_result)
-                    summary["encoding_check_runs"] += 1
-                    _enc_out = langfuse_output_payload(
-                        encoding_checker_result,
-                        key="encoding_checker",
+                        encoding_checker_run_result = await encoding_checker_agent.run()
+                        self._accumulate_usage_summary(
+                            encoding_checker_run_result, "EncodingCheckerAgent"
+                        )
+                        encoding_checker_result = (
+                            encoding_checker_run_result.output.strip("```json\n").strip(
+                                "\n```"
+                            )
+                        )
+                        encoding_checker_result = json.loads(encoding_checker_result)
+                        summary["encoding_check_runs"] += 1
+                        _enc_out = langfuse_output_payload(
+                            encoding_checker_result,
+                            key="encoding_checker",
+                        )
+                        langfuse_safe_update(enc_span, output_payload=_enc_out)
+                    except Exception as e:
+                        langfuse_safe_update(
+                            enc_span,
+                            output_payload={"error": str(e)},
+                            level="ERROR",
+                            status_message=str(e),
+                        )
+                        raise
+                    finally:
+                        langfuse_safe_end(enc_span)
+                else:
+                    anchor_chunks = self._encoding_checker_sample_chunks(
+                        anchor_df, anchor_column
                     )
-                    langfuse_safe_update(enc_span, output_payload=_enc_out)
-                except Exception as e:
-                    langfuse_safe_update(
-                        enc_span,
-                        output_payload={"error": str(e)},
-                        level="ERROR",
-                        status_message=str(e),
+                    if self.verbose and range_status is not None:
+                        range_status.update(
+                            f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
+                            f"[yellow]{anchor_col_name}[/yellow] · "
+                            f"{len(anchor_df)} context rows · "
+                            f"{len(anchor_chunks)} encoding call(s)…"
+                        )
+
+                    encoding_checker_results: list[dict] = []
+                    for chunk_idx, anchor_chunk in enumerate(anchor_chunks, start=1):
+                        if self.verbose and range_status is not None:
+                            range_status.update(
+                                f"[cyan]Range {range_idx}/{n_ranges}[/cyan] · "
+                                f"[yellow]{anchor_col_name}[/yellow] · encoding "
+                                f"[dim]{chunk_idx}/{len(anchor_chunks)}[/dim] · "
+                                f"{len(anchor_chunk)} context rows"
+                            )
+
+                        enc_meta = {
+                            "agent": "EncodingCheckerAgent",
+                            "range_index": range_idx,
+                            "chunk_index": chunk_idx,
+                            "chunk_count": len(anchor_chunks),
+                            "anchor_column": anchor_col_name,
+                            "segment": self._fixer_segment_label,
+                        }
+                        if langfuse_encoding_metadata:
+                            enc_meta.update(langfuse_encoding_metadata)
+                        enc_span = langfuse_safe_trace(
+                            langfuse_client,
+                            name="EncodingCheckerAgent",
+                            input_payload={
+                                "range_index": range_idx,
+                                "chunk_index": chunk_idx,
+                                "chunk_count": len(anchor_chunks),
+                                "anchor_column": anchor_col_name,
+                                "segment": self._fixer_segment_label,
+                                "context_rows": len(anchor_chunk),
+                            },
+                            metadata=enc_meta,
+                            new_trace=True,
+                        )
+                        try:
+                            encoding_checker_agent = Agent(
+                                name="EncodingCheckerAgent",
+                                model=encoding_checker_model,
+                                system_prompt=(
+                                    ENCODING_CHECKER_PROMPT.safe_substitute(
+                                        dataset_info=user_df_info,
+                                        sample=anchor_chunk.to_dict(orient="records"),
+                                        dependency=dependent_range,
+                                    )
+                                ),
+                                instrument=False,
+                            )
+
+                            encoding_checker_run_result = (
+                                await encoding_checker_agent.run()
+                            )
+                            self._accumulate_usage_summary(
+                                encoding_checker_run_result, "EncodingCheckerAgent"
+                            )
+                            encoding_checker_result = (
+                                encoding_checker_run_result.output.strip(
+                                    "```json\n"
+                                ).strip("\n```")
+                            )
+                            encoding_checker_result = json.loads(
+                                encoding_checker_result
+                            )
+                            encoding_checker_results.append(encoding_checker_result)
+                            summary["encoding_check_runs"] += 1
+                            _enc_out = langfuse_output_payload(
+                                encoding_checker_result,
+                                key="encoding_checker",
+                            )
+                            langfuse_safe_update(enc_span, output_payload=_enc_out)
+                        except Exception as e:
+                            langfuse_safe_update(
+                                enc_span,
+                                output_payload={"error": str(e)},
+                                level="ERROR",
+                                status_message=str(e),
+                            )
+                            raise
+                        finally:
+                            langfuse_safe_end(enc_span)
+
+                    encoding_checker_result = self._merge_encoding_checker_results(
+                        encoding_checker_results
                     )
-                    raise
-                finally:
-                    langfuse_safe_end(enc_span)
 
                 anchor_col = dependent_range["anchor_column"]
                 dependent_cols = [
@@ -822,31 +1338,45 @@ class DependencyFixer:
                             )
                         batch_full = single_anchor_df.iloc[i : i + batch_size].copy()
                         batch_dep = batch_full[dep_cols].copy()
-                        n_rows = len(batch_dep)
-                        summary["detector_batches_attempted"] += 1
                         per_anchor_batches += 1
-                        prompt = DEPENDENT_RANGE_BATCH_DETECTOR_PROMPT.safe_substitute(
-                            anchor_column=str(anchor_col),
-                            anchor_value=str(unq),
-                            anchor_encoded=str(encoded_unq),
-                            dependent_columns=str(dependent_cols),
-                            n_rows=str(n_rows),
-                            batch_rows=json.dumps(
-                                batch_dep.to_dict(orient="records"), ensure_ascii=False
-                            ),
-                        )
+                        current_batch_dep = batch_dep.copy()
+                        pending_row_labels = list(current_batch_dep.index)
+                        corrected_row_labels: set[Any] = set()
+                        duplicate_retry_note = ""
+                        n_fixes = 0
+                        batch_applied = False
+                        invalid_row_labels_for_batch: set[Any] = set()
+                        detector_user_prompt = DEPENDENT_RANGE_BATCH_DETECTOR_USER_PROMPT
+                        max_detector_attempts = max_attempts + max(5, max_attempts)
+                        duplicate_retry_count = 0
 
-                        retry_instruction = (
-                            DEPENDENT_RANGE_BATCH_DETECTOR_FORMAT_REMINDER
-                        )
-                        dependency_violation_detector_result = None
-                        detector_user_prompt = (
-                            DEPENDENT_RANGE_BATCH_DETECTOR_USER_PROMPT
-                        )
-                        for attempt in range(max_attempts):
-                            attempt_prompt = (
-                                prompt if attempt == 0 else prompt + retry_instruction
+                        for attempt in range(max_detector_attempts):
+                            rows_to_check = current_batch_dep.loc[
+                                pending_row_labels, dep_cols
+                            ].copy()
+                            if rows_to_check.empty:
+                                batch_applied = True
+                                break
+
+                            summary["detector_batches_attempted"] += 1
+                            attempt_prompt = DEPENDENT_RANGE_BATCH_DETECTOR_PROMPT.safe_substitute(
+                                anchor_column=str(anchor_col),
+                                anchor_value=str(unq),
+                                anchor_encoded=str(encoded_unq),
+                                dependent_columns=str(dependent_cols),
+                                n_rows=str(len(rows_to_check)),
+                                batch_rows=json.dumps(
+                                    rows_to_check.to_dict(orient="records"),
+                                    ensure_ascii=False,
+                                ),
                             )
+                            if duplicate_retry_note:
+                                attempt_prompt += duplicate_retry_note
+                            elif attempt > 0:
+                                attempt_prompt += (
+                                    DEPENDENT_RANGE_BATCH_DETECTOR_FORMAT_REMINDER
+                                )
+
                             dependency_violation_detector_agent = Agent(
                                 name="DependencyViolationDetectorAgent",
                                 model=dependency_violation_detector_model,
@@ -858,20 +1388,33 @@ class DependencyFixer:
                             )
 
                             try:
+                                run_model_settings = (
+                                    self._duplicate_retry_model_settings(
+                                        duplicate_retry_count
+                                    )
+                                )
+                                if run_model_settings:
+                                    summary[
+                                        "detector_duplicate_retry_temperatures"
+                                    ].append(float(run_model_settings["temperature"]))
                                 run_result = (
                                     await dependency_violation_detector_agent.run(
-                                        detector_user_prompt
+                                        detector_user_prompt,
+                                        model_settings=run_model_settings,
                                     )
+                                )
+                                self._accumulate_usage_summary(
+                                    run_result, "DependencyViolationDetectorAgent"
                                 )
                             except UnexpectedModelBehavior as e:
                                 summary["detector_failed_attempts"] += 1
                                 print(
                                     f"UnexpectedModelBehavior in DependencyViolationDetectorAgent "
-                                    f"(attempt {attempt + 1}/{max_attempts}, batch start row {i}): {e}"
+                                    f"(attempt {attempt + 1}/{max_detector_attempts}, batch start row {i}): {e}"
                                 )
                                 if self.verbose:
                                     RICH_CONSOLE.print_exception(show_locals=False)
-                                if attempt + 1 < max_attempts:
+                                if attempt + 1 < max_detector_attempts:
                                     delay = min(
                                         60.0, (2**attempt) + random.uniform(0, 1.5)
                                     )
@@ -881,11 +1424,11 @@ class DependencyFixer:
                                 summary["detector_failed_attempts"] += 1
                                 print(
                                     f"JSONDecodeError in DependencyViolationDetectorAgent "
-                                    f"(attempt {attempt + 1}/{max_attempts}, batch start row {i}): {e}"
+                                    f"(attempt {attempt + 1}/{max_detector_attempts}, batch start row {i}): {e}"
                                 )
                                 if self.verbose:
                                     RICH_CONSOLE.print_exception(show_locals=False)
-                                if attempt + 1 < max_attempts:
+                                if attempt + 1 < max_detector_attempts:
                                     delay = min(
                                         60.0, (2**attempt) + random.uniform(0, 1.5)
                                     )
@@ -895,12 +1438,12 @@ class DependencyFixer:
                                 summary["detector_failed_attempts"] += 1
                                 print(
                                     f"Unexpected error in DependencyViolationDetectorAgent "
-                                    f"(attempt {attempt + 1}/{max_attempts}, batch start row {i}): "
+                                    f"(attempt {attempt + 1}/{max_detector_attempts}, batch start row {i}): "
                                     f"{type(e).__name__}: {e}"
                                 )
                                 if self.verbose:
                                     RICH_CONSOLE.print_exception(show_locals=False)
-                                if attempt + 1 < max_attempts:
+                                if attempt + 1 < max_detector_attempts:
                                     delay = min(
                                         60.0, (2**attempt) + random.uniform(0, 1.5)
                                     )
@@ -934,53 +1477,78 @@ class DependencyFixer:
                             is_valid_shape = isinstance(parsed_output, list) and all(
                                 isinstance(item, dict) for item in parsed_output
                             )
+                            if is_valid_shape and len(parsed_output) != len(rows_to_check):
+                                is_valid_shape = False
                             if is_valid_shape:
                                 dependency_violation_detector_result = parsed_output
+                            else:
+                                if attempt + 1 >= max_detector_attempts:
+                                    break
+                                continue
+
+                            attempt_invalid_labels: list[Any] = []
+                            attempt_fix_count = 0
+                            for res_idx, res in enumerate(
+                                dependency_violation_detector_result
+                            ):
+                                if res.get("is_valid"):
+                                    continue
+
+                                row_label = rows_to_check.index[res_idx]
+                                attempt_invalid_labels.append(row_label)
+                                invalid_row_labels_for_batch.add(row_label)
+                                corrected_values = res.get("corrected_values") or []
+                                if len(corrected_values) != len(dependent_cols):
+                                    continue
+
+                                for value_idx, value in enumerate(corrected_values):
+                                    target_col = dependent_cols[value_idx]
+                                    current_batch_dep.at[row_label, target_col] = (
+                                        self._coerce_corrected_value(
+                                            value, current_batch_dep[target_col].dtype
+                                        )
+                                    )
+                                    attempt_fix_count += 1
+                                corrected_row_labels.add(row_label)
+
+                            if not corrected_row_labels and not attempt_invalid_labels:
+                                batch_applied = True
                                 break
 
-                        if dependency_violation_detector_result is None:
-                            summary["detector_batches_skipped_invalid_response"] += 1
-                            per_anchor_skips += 1
-                            print(
-                                f"Skipping batch starting at row {i}: invalid detector response format."
+                            candidate_out_df = out_df.copy()
+                            candidate_out_df.loc[current_batch_dep.index, dep_cols] = (
+                                current_batch_dep[dep_cols]
                             )
-                            continue
+                            duplicate_labels = self._duplicate_labels_for_indices(
+                                candidate_out_df,
+                                corrected_row_labels.union(attempt_invalid_labels),
+                            )
+                            if not duplicate_labels:
+                                out_df = candidate_out_df
+                                n_fixes += attempt_fix_count
+                                batch_applied = True
+                                break
 
-                        n_fixes = 0
-                        for res_idx, res in enumerate(
-                            dependency_violation_detector_result
-                        ):
-                            if not res.get("is_valid"):
-                                for idx, col in enumerate(
-                                    res.get("corrected_values") or []
-                                ):
-                                    if idx >= len(dependent_cols):
-                                        continue
+                            pending_row_labels = duplicate_labels
+                            duplicate_retry_note = self._duplicate_retry_note(
+                                candidate_out_df, duplicate_labels, dependent_cols
+                            )
+                            duplicate_retry_count += 1
+                            summary["detector_duplicate_retries"] += 1
 
-                                    target_col = dependent_cols[idx]
-                                    row_label = batch_dep.index[res_idx]
-                                    target_dtype = batch_dep[target_col].dtype
-                                    casted_value = col
+                        if not batch_applied:
+                            labels_to_drop = list(
+                                invalid_row_labels_for_batch or set(pending_row_labels)
+                            )
+                            labels_to_drop = [
+                                label for label in labels_to_drop if label in out_df.index
+                            ]
+                            if labels_to_drop:
+                                out_df = out_df.drop(index=labels_to_drop)
+                            summary[
+                                "detector_invalid_rows_dropped_after_duplicate_retries"
+                            ] += len(labels_to_drop)
 
-                                    try:
-                                        if pd.api.types.is_float_dtype(target_dtype):
-                                            casted_value = float(col)
-                                        elif pd.api.types.is_integer_dtype(
-                                            target_dtype
-                                        ):
-                                            casted_value = int(float(col))
-                                        elif (
-                                            pd.api.types.is_string_dtype(target_dtype)
-                                            or target_dtype == object
-                                        ):
-                                            casted_value = str(col)
-                                    except (TypeError, ValueError):
-                                        casted_value = col
-
-                                    batch_dep.at[row_label, target_col] = casted_value
-                                    n_fixes += 1
-
-                        out_df.loc[batch_dep.index, dep_cols] = batch_dep[dep_cols]
                         summary["detector_batches_applied"] += 1
                         summary["model_cells_updated"] += n_fixes
                         per_anchor_cells += n_fixes
@@ -1014,6 +1582,7 @@ class DependencyFixer:
         """
         self._pending_llm_dependent_ranges = []
         syn_df = self.syn_df
+        self._row_filter_baseline_count = len(syn_df)
         for dep_type, deps in self.dependencies.items():
             if dep_type == "mapping":
                 syn_df = self._fix_mapping(deps, self.real_df, syn_df)
@@ -1059,18 +1628,28 @@ class DependencyFixer:
         self.verbose = verbose
         self._fixer_segment_label = segment_label
         self._had_llm_dependent_range_pass = False
+        self.llm_usage_summary = {
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        self.per_agent_usage_summary = {}
         role = f"[dim]· {segment_label} ·[/dim] " if segment_label else ""
         if self.verbose:
             RICH_CONSOLE.print(
                 f"[bold cyan]DependencyFixer start[/bold cyan] {role}"
                 f"input_rows={len(self.syn_df)}, "
-                f"dependency_types={list(self.dependencies.keys())}"
+                f"dependency_types={list(self.dependencies.keys())}, "
+                f"duplicates=({self._duplicate_summary_text(self.syn_df)})"
             )
         syn_df = self.fix_dependencies()
         if self.verbose:
             RICH_CONSOLE.print(
                 f"[cyan]Rule-based dependency fixes complete[/cyan] {role}"
-                f"{len(syn_df)} rows remain."
+                f"{len(syn_df)} rows remain, "
+                f"duplicates=({self._duplicate_summary_text(syn_df)})."
             )
         pending = self._pending_llm_dependent_ranges
         if pending:
@@ -1090,7 +1669,8 @@ class DependencyFixer:
         if self.verbose:
             RICH_CONSOLE.print(
                 f"[bold green]DependencyFixer finished[/bold green] {role}"
-                f"output_rows={len(syn_df)}, llm_pass={self._had_llm_dependent_range_pass}"
+                f"output_rows={len(syn_df)}, llm_pass={self._had_llm_dependent_range_pass}, "
+                f"duplicates=({self._duplicate_summary_text(syn_df)})"
             )
         self._fixer_segment_label = None
         return syn_df

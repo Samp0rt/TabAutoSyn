@@ -336,8 +336,14 @@ Task:
 
 CORRECTION QUALITY RULES:
 - Corrections must be logically valid for the given anchor.
-- Across invalid rows in this batch, prefer diverse corrected values.
+- Across invalid rows in this batch, corrected value tuples MUST be diverse.
 - Do NOT assign one identical default tuple (e.g., state center) to every invalid row.
+- Do NOT return duplicate `corrected_values` tuples for different invalid rows unless the valid
+  anchor-specific range has only one plausible value.
+- Avoid creating duplicate samples: the tuple `[$anchor_value] + corrected_values` should differ
+  from other corrected rows and, when possible, from already valid rows in this batch.
+- If several invalid rows share the same anchor, spread corrections across different plausible
+  anchor-specific values instead of collapsing them to one center/default.
 - Keep diversity realistic: values should stay within plausible anchor-specific ranges.
 
 STRICT OUTPUT REQUIREMENTS:
